@@ -138,6 +138,8 @@ test {
     _ = @import("net.zig");
     _ = @import("task.zig");
     _ = @import("arithmetic.zig");
+    _ = @import("arithmetic_curriculum.zig");
+    _ = @import("termination.zig");
     _ = sim;
     _ = log;
 }

@@ -319,6 +319,18 @@ pub const Config = struct {
     arithmetic_settle_steps: u32 = 15,
     arithmetic_readout_steps: u32 = 20,
 
+    // -- learned termination (Phase 9) -----------------------------------
+    // The first answer interface deliberately uses a fixed window (Phase 8).
+    // Once answer production is reliable, an opt-in stable-answer controller
+    // ends the episode as soon as one *unique* answer stays dominant for this
+    // many consecutive readout steps. This is answer-ID-neutral: it cannot
+    // encode, or favour, a particular answer. A finite timeout remains a hard
+    // safety rail and receives its own weaker terminal reward.
+    termination_enabled: bool = false,
+    termination_stable_steps: u32 = 4,
+    termination_timeout_steps: u32 = 40,
+    termination_timeout_reward: f32 = -0.2,
+
     // -- workspace-inspired broadcast (Phase 7) --------------------------
     // A deliberately small, task-scoped global-workspace metaphor. The two
     // input assemblies are the only candidate writers; their recent activity
@@ -414,6 +426,17 @@ pub const Config = struct {
             const action_groups = 2 * max_operand + 1;
             const required = (symbol_groups + action_groups) * self.arithmetic_group_size;
             if (required > self.nExcitatory()) return error.ArithmeticGroupsExceedExcitatory;
+        }
+
+        // Phase 9 builds on the bounded arithmetic action interface. It is
+        // explicitly opt-in, so the Phase 8 fixed-window protocol remains the
+        // default and the Phase 1 baseline is byte-identical.
+        if (self.termination_enabled) {
+            if (!self.arithmetic_enabled) return error.TerminationNeedsArithmetic;
+            if (self.termination_stable_steps == 0) return error.ZeroTerminationStableWindow;
+            if (self.termination_timeout_steps < self.termination_stable_steps)
+                return error.TerminationTimeoutTooShort;
+            if (self.termination_timeout_reward >= 0.0) return error.BadTimeoutReward;
         }
 
         // Phase 5 structural plasticity knobs. Permanence lives in [0,1]; the
@@ -538,6 +561,23 @@ test "config: arithmetic layout must fit the excitatory population" {
     var c = Config{ .arithmetic_enabled = true };
     try std.testing.expectError(error.ArithmeticGroupsExceedExcitatory, c.validate());
     c.n_neurons = 200;
+    try c.validate();
+}
+
+test "config: learned termination needs a bounded action interface" {
+    var c = Config{ .termination_enabled = true };
+    try std.testing.expectError(error.TerminationNeedsArithmetic, c.validate());
+    c.arithmetic_enabled = true;
+    c.n_neurons = 200;
+    c.termination_stable_steps = 0;
+    try std.testing.expectError(error.ZeroTerminationStableWindow, c.validate());
+    c.termination_stable_steps = 4;
+    c.termination_timeout_steps = 3;
+    try std.testing.expectError(error.TerminationTimeoutTooShort, c.validate());
+    c.termination_timeout_steps = 4;
+    c.termination_timeout_reward = 0.0;
+    try std.testing.expectError(error.BadTimeoutReward, c.validate());
+    c.termination_timeout_reward = -0.2;
     try c.validate();
 }
 

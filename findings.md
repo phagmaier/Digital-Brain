@@ -259,6 +259,23 @@ assemblies — **not** evidence that the unconstrained reservoir spontaneously
 invented symbolic arithmetic. Preserve that distinction when interpreting or
 extending Phase 8.
 
+## Phase 9 — learned termination
+
+**Termination is controlled by stable evidence, not answer identity.** The
+Phase 9 interface observes the same accumulated spike-count evidence used by
+the answer reader and terminates only when one uniquely dominant answer persists
+for the configured stable window. Silence and ties reset the window, preventing
+a low-index tie from becoming an implicit answer. This keeps timing separate
+from answer representation while letting the rewarded readout learn to make
+reliable answers available early.
+
+**Timeout is a safety rail with a distinct terminal scalar.** A finite maximum
+readout duration prevents a non-committing episode from running indefinitely.
+Timely correct and incorrect commitments use `+1` and `-1`; timeouts use the
+smaller configured penalty (default `-0.2`). The scalar is sent through the
+existing eligibility-trace `applyReward()` path; Phase 9 adds no second learning
+rule and consumes no RNG, so reproducibility is preserved.
+
 **The held-out result decisively exceeds exact-pair memorization on the stated
 split.** Training excludes every nonzero addition with result four
 (`1+3`, `2+2`, `3+1`) while retaining the needed unit transitions and examples
