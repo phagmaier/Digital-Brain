@@ -137,9 +137,18 @@ pub const Synapses = struct {
     delay: []u16,
     /// Phase 3+. Allocated now so adding learning is not a refactor.
     eligibility: []f32,
-    /// Phase 5+.
+    /// Phase 5 structural plasticity. `permanence` (q in [0,1]) is resistance to
+    /// pruning, distinct from `weight`; `age` counts structural events since the
+    /// synapse was created (grace period for pruning); `structural` marks the
+    /// reservoir/grown edges that growth+pruning may touch (task readout and
+    /// recurrent edges are NOT structural). `alive` gates delivery and, when
+    /// false in a padded CSR slot, marks a free slot growth can write into.
     permanence: []f32,
     age: []u32,
+    /// True iff this edge is managed by Phase 5 growth/pruning (reservoir + grown
+    /// edges). Task readout / working-memory recurrent edges are false and are
+    /// never decayed or pruned. Dead free slots are false until grown into.
+    structural: []bool,
     plastic: []bool,
     alive: []bool,
 
@@ -155,6 +164,7 @@ pub const Synapses = struct {
         gpa.free(self.eligibility);
         gpa.free(self.permanence);
         gpa.free(self.age);
+        gpa.free(self.structural);
         gpa.free(self.plastic);
         gpa.free(self.alive);
         gpa.free(self.out_start);
@@ -290,79 +300,133 @@ pub const Network = struct {
         const m: u32 = @intCast(src.items.len);
         if (m == 0) return error.EmptyGraph;
 
+        // Live out-degree per source neuron. src is grouped ascending by source,
+        // so a single scan gives each neuron's count.
+        const live_count = try gpa.alloc(u32, n);
+        defer gpa.free(live_count);
+        @memset(live_count, 0);
+        for (src.items) |s| live_count[s] += 1;
+
+        // Per-neuron CSR capacity. With structural plasticity OFF the slice is
+        // exactly the live edges (no padding) -> the layout, and every artefact,
+        // is byte-identical to the pre-Phase-5 build. With it ON each neuron gets
+        // at least `max_out_degree` slots: the live edges pack the front, the
+        // remainder are dead FREE SLOTS that growth writes into (DEC-011). A
+        // neuron already above budget keeps all its edges (max, not min).
+        var total: u32 = 0;
+        for (0..n) |i| {
+            const cap = if (c.structural_plasticity_enabled)
+                @max(live_count[i], c.max_out_degree)
+            else
+                live_count[i];
+            total += cap;
+        }
+
         var syn: Synapses = .{
-            .n = m,
-            .source = try gpa.alloc(NeuronId, m),
-            .target = try gpa.alloc(NeuronId, m),
-            .weight = try gpa.alloc(f32, m),
-            .p_release = try gpa.alloc(f32, m),
-            .delay = try gpa.alloc(u16, m),
-            .eligibility = try gpa.alloc(f32, m),
-            .permanence = try gpa.alloc(f32, m),
-            .age = try gpa.alloc(u32, m),
-            .plastic = try gpa.alloc(bool, m),
-            .alive = try gpa.alloc(bool, m),
+            .n = total,
+            .source = try gpa.alloc(NeuronId, total),
+            .target = try gpa.alloc(NeuronId, total),
+            .weight = try gpa.alloc(f32, total),
+            .p_release = try gpa.alloc(f32, total),
+            .delay = try gpa.alloc(u16, total),
+            .eligibility = try gpa.alloc(f32, total),
+            .permanence = try gpa.alloc(f32, total),
+            .age = try gpa.alloc(u32, total),
+            .structural = try gpa.alloc(bool, total),
+            .plastic = try gpa.alloc(bool, total),
+            .alive = try gpa.alloc(bool, total),
             .out_start = try gpa.alloc(u32, n + 1),
         };
         errdefer syn.deinit(gpa);
 
-        // src is already sorted ascending by construction (outer loop is i), so
-        // CSR ranges fall out directly. No sort, no hash map.
         const delay_span: u64 = @as(u64, c.max_delay) - @as(u64, c.min_delay) + 1;
 
-        for (0..m) |k| {
-            const s = src.items[k];
-            syn.source[k] = s;
-            syn.target[k] = dst.items[k];
+        // Fill, neuron by neuron, live edges first then free slots. `ck` walks the
+        // grouped candidate arrays; `w` is the write cursor into the padded CSR.
+        var ck: usize = 0; // candidate index (0..m), consumed in source order
+        var w: u32 = 0; // write cursor (0..total)
+        for (0..n) |i| {
+            syn.out_start[i] = w;
+            const cap = if (c.structural_plasticity_enabled)
+                @max(live_count[i], c.max_out_degree)
+            else
+                live_count[i];
 
-            // Task edges draw NO RNG (see above), so the reservoir's stream is
-            // unchanged. Their sources are always excitatory (input groups are the
-            // low IDs), so the effect is excitatory and weights start positive.
-            switch (edge_kind.items[k]) {
-                .readout => {
-                    // Plastic input->action readout (Phase 3). Shortest delay.
-                    syn.weight[k] = c.task_ia_weight_init;
-                    syn.p_release[k] = c.task_ia_p_release;
-                    syn.delay[k] = c.min_delay;
-                    syn.plastic[k] = c.plasticity_enabled; // learns only when plasticity is on
-                },
-                .recurrent => {
-                    // Fixed input-group self-excitation (Phase 4 working memory).
-                    syn.weight[k] = c.task_recurrent_weight;
-                    syn.p_release[k] = c.task_ia_p_release;
-                    syn.delay[k] = c.min_delay;
-                    syn.plastic[k] = false;
-                },
-                .reservoir => {
-                    syn.weight[k] = switch (neurons.kind[s]) {
-                        .excitatory => r.range(c.w_exc_init_lo, c.w_exc_init_hi),
-                        .inhibitory => r.range(c.w_inh_init_lo, c.w_inh_init_hi),
-                    };
-                    syn.p_release[k] = c.release_probability;
-                    syn.delay[k] = @intCast(c.min_delay + r.below(delay_span));
-                    syn.plastic[k] = false; // the random reservoir is fixed; only readout edges learn
-                },
+            // Live edges for neuron i, in original candidate order.
+            for (0..live_count[i]) |_| {
+                const s = src.items[ck];
+                std.debug.assert(s == @as(NeuronId, @intCast(i)));
+                syn.source[w] = s;
+                syn.target[w] = dst.items[ck];
+
+                // Task edges draw NO RNG (see above), so the reservoir's stream is
+                // unchanged. Their sources are always excitatory (input groups are
+                // the low IDs), so the effect is excitatory and weights positive.
+                switch (edge_kind.items[ck]) {
+                    .readout => {
+                        // Plastic input->action readout (Phase 3). Shortest delay.
+                        syn.weight[w] = c.task_ia_weight_init;
+                        syn.p_release[w] = c.task_ia_p_release;
+                        syn.delay[w] = c.min_delay;
+                        syn.plastic[w] = c.plasticity_enabled; // learns only when plasticity is on
+                        syn.structural[w] = false; // readout is functional, never pruned
+                    },
+                    .recurrent => {
+                        // Fixed input-group self-excitation (Phase 4 working memory).
+                        syn.weight[w] = c.task_recurrent_weight;
+                        syn.p_release[w] = c.task_ia_p_release;
+                        syn.delay[w] = c.min_delay;
+                        syn.plastic[w] = false;
+                        syn.structural[w] = false; // working memory, never pruned
+                    },
+                    .reservoir => {
+                        syn.weight[w] = switch (neurons.kind[s]) {
+                            .excitatory => r.range(c.w_exc_init_lo, c.w_exc_init_hi),
+                            .inhibitory => r.range(c.w_inh_init_lo, c.w_inh_init_hi),
+                        };
+                        syn.p_release[w] = c.release_probability;
+                        syn.delay[w] = @intCast(c.min_delay + r.below(delay_span));
+                        syn.plastic[w] = false; // the random reservoir is fixed; only readout edges learn
+                        syn.structural[w] = true; // reservoir edges are what growth/pruning manage
+                    },
+                }
+
+                syn.eligibility[w] = 0;
+                syn.permanence[w] = 0.5;
+                syn.age[w] = 0;
+                syn.alive[w] = true;
+
+                // THE INVARIANTS. Assert them at the point of construction, not in
+                // a comment 400 lines away.
+                std.debug.assert(syn.delay[w] >= 1); // DEC-001
+                std.debug.assert(syn.delay[w] <= c.max_delay);
+                std.debug.assert(syn.weight[w] >= 0.0); // sign lives in the neuron
+
+                ck += 1;
+                w += 1;
             }
 
-            syn.eligibility[k] = 0;
-            syn.permanence[k] = 0.5;
-            syn.age[k] = 0;
-            syn.alive[k] = true;
-
-            // THE INVARIANTS. Assert them at the point of construction, not in
-            // a comment 400 lines away.
-            std.debug.assert(syn.delay[k] >= 1); // DEC-001
-            std.debug.assert(syn.delay[k] <= c.max_delay);
-            std.debug.assert(syn.weight[k] >= 0.0); // sign lives in the neuron
+            // Free slots: dead, inert placeholders in neuron i's CSR range that
+            // growth can later claim. source == i (CSR requires it); everything
+            // else is neutral. alive=false keeps them out of every traversal.
+            for (live_count[i]..cap) |_| {
+                syn.source[w] = @intCast(i);
+                syn.target[w] = @intCast((i + 1) % n); // valid, non-self, never delivered
+                syn.weight[w] = 0;
+                syn.p_release[w] = 0;
+                syn.delay[w] = c.min_delay; // >= 1 so the delay invariant still holds
+                syn.eligibility[w] = 0;
+                syn.permanence[w] = 0;
+                syn.age[w] = 0;
+                syn.structural[w] = false;
+                syn.plastic[w] = false;
+                syn.alive[w] = false;
+                w += 1;
+            }
         }
-
-        // Build CSR offsets.
-        var k: usize = 0;
-        for (0..n) |i| {
-            syn.out_start[i] = @intCast(k);
-            while (k < m and syn.source[k] == @as(NeuronId, @intCast(i))) : (k += 1) {}
-        }
-        syn.out_start[n] = m;
+        syn.out_start[n] = w;
+        std.debug.assert(w == total);
+        std.debug.assert(ck == m);
 
         return .{ .neurons = neurons, .synapses = syn, .config = c };
     }
@@ -541,4 +605,99 @@ test "net: input-group self-excitation adds the expected fixed recurrent edges (
         }
     }
     try testing.expect(found >= 2 * g * (g - 1));
+}
+
+// ---- Phase 5: structural plasticity (build side) ----------------------------
+
+test "net: structural plasticity off leaves the CSR unpadded (every slot is a live edge)" {
+    // The default (structural off) build must be exactly the pre-Phase-5 graph:
+    // no dead free slots, every synapse alive. This is what keeps the Phase 1
+    // baseline byte-identical.
+    const gpa = testing.allocator;
+    var net = try Network.build(gpa, .{ .master_seed = 42 });
+    defer net.deinit(gpa);
+    for (0..net.synapses.n) |k| try testing.expect(net.synapses.alive[k]);
+}
+
+test "net: structural plasticity on over-allocates free slots and honours the budget" {
+    const gpa = testing.allocator;
+    const budget: u32 = 20;
+    var net = try Network.build(gpa, .{
+        .master_seed = 42,
+        .structural_plasticity_enabled = true,
+        .max_out_degree = budget,
+    });
+    defer net.deinit(gpa);
+    const s = net.synapses;
+
+    var free_slots: u32 = 0;
+    for (0..net.neurons.n) |i| {
+        const r = s.outgoing(@intCast(i));
+        const cap = r.end - r.start;
+        // Capacity is at least the budget (more only if the initial graph already
+        // exceeded it), and never below the budget.
+        try testing.expect(cap >= budget);
+
+        var live: u32 = 0;
+        for (r.start..r.end) |k| {
+            try testing.expectEqual(@as(NeuronId, @intCast(i)), s.source[k]); // CSR still holds
+            if (s.alive[k]) live += 1 else free_slots += 1;
+        }
+        // Live out-degree never exceeds the neuron's slot capacity (the hard budget).
+        try testing.expect(live <= cap);
+    }
+    // Padding actually happened: there are free slots to grow into.
+    try testing.expect(free_slots > 0);
+}
+
+test "net: reservoir edges are structural, task edges are not" {
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 5,
+        .structural_plasticity_enabled = true,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .task_group_size = 8,
+        .task_recurrent_weight = 0.5,
+    };
+    var net = try Network.build(gpa, c);
+    defer net.deinit(gpa);
+    const s = net.synapses;
+
+    for (0..s.n) |k| {
+        if (!s.alive[k]) {
+            try testing.expect(!s.structural[k]); // dead free slots are non-structural
+            continue;
+        }
+        // Task readout (plastic) and working-memory recurrent edges are never
+        // structural; only the random reservoir edges are.
+        if (s.plastic[k]) try testing.expect(!s.structural[k]);
+    }
+}
+
+test "net: enabling structural plasticity does not perturb the reservoir's RNG stream" {
+    // Padding adds dead slots but draws NO extra RNG, so the live reservoir edges
+    // of a structural build must match a plain build byte-for-byte (in order).
+    // This is the Phase 5 analogue of the task-does-not-perturb-reservoir guard.
+    const gpa = testing.allocator;
+    const seed: u64 = 77;
+    var plain = try Network.build(gpa, .{ .master_seed = seed });
+    defer plain.deinit(gpa);
+    var structural = try Network.build(gpa, .{
+        .master_seed = seed,
+        .structural_plasticity_enabled = true,
+        .max_out_degree = 20,
+    });
+    defer structural.deinit(gpa);
+
+    var pk: usize = 0;
+    for (0..structural.synapses.n) |k| {
+        if (!structural.synapses.alive[k]) continue; // skip dead free slots
+        try testing.expectEqual(plain.synapses.source[pk], structural.synapses.source[k]);
+        try testing.expectEqual(plain.synapses.target[pk], structural.synapses.target[k]);
+        try testing.expectEqual(plain.synapses.weight[pk], structural.synapses.weight[k]);
+        try testing.expectEqual(plain.synapses.delay[pk], structural.synapses.delay[k]);
+        pk += 1;
+    }
+    try testing.expectEqual(plain.synapses.n, @as(u32, @intCast(pk)));
 }

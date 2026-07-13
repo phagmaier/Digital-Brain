@@ -195,6 +195,90 @@ pub const Config = struct {
     /// the stimulus after a delay. 0 disables it (the Phase 3 immediate regime).
     task_recurrent_weight: f32 = 0.0,
 
+    // -- structural plasticity (Phase 5, DEC-011) --------------------------
+    // Local random connection search: the reservoir graph GROWS and PRUNES
+    // connections over training instead of staying fixed. OFF by default so the
+    // Phase 1 baseline run is byte-identical; enable via configs/structural.json
+    // or the growth harness (zig build grow).
+    //
+    // Only RESERVOIR (and grown) edges are structural. The task readout and the
+    // working-memory recurrent edges are never grown, decayed, or pruned -- they
+    // carry Phase 3/4 function and must survive rewiring untouched.
+    //
+    // Mechanism (spec §8): every synapse carries a PERMANENCE q in [0,1] (its
+    // resistance to pruning, distinct from the functional weight). Used synapses
+    // consolidate (q -> 1); disused ones decay (q -> 0), their weight decays
+    // faster the lower q is (§8.5), and once weak + low-permanence + old enough
+    // they are pruned (§8.6), freeing a slot. Growth then samples a nearby target
+    // (local random search, §8.1) and installs a weak tentative synapse in a free
+    // slot. The per-neuron slot capacity IS the outgoing connection budget (§8.7).
+    structural_plasticity_enabled: bool = false,
+
+    /// Per-neuron outgoing slot capacity == the HARD connection budget (§8.7's
+    /// "maximum outgoing synapses"). Each source neuron gets this many CSR slots;
+    /// its initial live edges fill the front, the rest are free slots for growth.
+    /// A neuron already above budget from the initial graph simply cannot grow
+    /// until pruning frees a slot -- capacity is max(initial_out_degree, this).
+    max_out_degree: u32 = 20,
+
+    /// Target STRUCTURAL out-degree (§8.7's "target outgoing degree"). Growth stops
+    /// adding to a source once it has this many live structural (reservoir/grown)
+    /// out-edges, so the live population plateaus instead of accreting to the hard
+    /// cap; pruning then frees room and growth refills it, which is what turns
+    /// steady accretion into genuine TURNOVER around a set point. 0 disables the
+    /// set-point (grow until the hard cap). Must be <= max_out_degree.
+    target_out_degree: u32 = 10,
+
+    // Permanence update (§8.4), simplified for reservoir edges (which carry no
+    // eligibility trace): co-activity of the two endpoints STABILIZES a synapse,
+    // disuse DECAYS it. Co-activity is read from the endpoints' rate EMAs,
+    // normalized to target_rate (both firing at target -> coactivity 1).
+    //   q += eta_a * coactivity  -  lambda_q  +  eta_q * max(0, baseline * e)
+    permanence_activity_lr: f32 = 0.05, // eta_a: gain from endpoint co-activity
+    permanence_disuse_decay: f32 = 0.05, // lambda_q: leak per structural event
+    /// Ceiling on the (target-normalized) co-activity term, so an over-active
+    /// endpoint pair cannot pin permanence at 1 for every synapse. With eta_a ==
+    /// lambda_q, the break-even co-activity is 1 (both endpoints at target); more
+    /// co-active than that consolidates, less decays toward prunable. The low
+    /// clamp keeps even consolidated synapses off the hard ceiling so weight decay
+    /// stays mildly active -- which is what keeps weak/grown synapses cycling out
+    /// (real turnover) rather than every synapse pinning at permanence 1.
+    coactivity_max: f32 = 1.5,
+    /// eta_q: reward-gated stabilization (§8.4's rewarded-eligibility term). Only
+    /// bites on synapses that carry eligibility (plastic ones); reservoir edges
+    /// have e=0 so it does nothing to them. 0 by default -- kept for completeness.
+    permanence_reward_lr: f32 = 0.0,
+
+    /// Permanence-dependent weight decay (§8.5): w *= 1 - lambda_w*(1-q). High
+    /// permanence -> ~no decay; low permanence -> fast decay toward prunable.
+    weight_permanence_decay: f32 = 0.12, // lambda_w
+
+    // Pruning (§8.6): remove a structural synapse when it is simultaneously
+    // low-permanence, weak, AND past a minimum age (the grace period that stops a
+    // tentative synapse being deleted before it can participate).
+    prune_permanence_min: f32 = 0.12, // q_min
+    prune_weight_min: f32 = 0.08, // w_min
+    min_synapse_age: u32 = 2, // in structural events
+
+    // Growth (§8.1, pure local random search -- heuristic #1, the baseline). Each
+    // structural event, a source neuron with a free slot attempts (with prob
+    // growth_probability) to sample a point near itself and connect to the nearest
+    // legal neuron. New synapses are WEAK and TENTATIVE (low permanence) -- strong
+    // new weights and no grace period are listed failure modes (§21).
+    growth_probability: f32 = 0.10, // per source neuron per structural event
+    /// Spatial spread of the local target sample. 0 => reuse spatial_sigma.
+    growth_sigma: f32 = 0.0,
+    grow_weight_init: f32 = 0.1, // weak (well below w_exc_init_lo)
+    grow_permanence_init: f32 = 0.35, // tentative: above q_min, below established
+
+    /// Cadence of structural events in the CONTINUOUS simulator, analogous to
+    /// homeostasis_per_step. 0 (the default) hands cadence to the caller: the
+    /// episode harness sets it 0 and calls Sim.applyStructuralPlasticity() once
+    /// per growth window. > 0 makes Sim.step() run a structural event every this-
+    /// many steps, so a free-running `zig build run -- configs/structural.json`
+    /// visibly rewires. Keep it large -- growth is the slowest clock (§8.7).
+    structural_interval_steps: u32 = 0,
+
     // -- run --------------------------------------------------------------
     steps: u32 = 2000,
 
@@ -241,6 +325,27 @@ pub const Config = struct {
             const n_exc: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(self.n_neurons)) * self.excitatory_fraction));
             if (self.task_group_size == 0) return error.EmptyTaskGroup;
             if (4 * self.task_group_size > n_exc) return error.TaskGroupsExceedExcitatory;
+        }
+
+        // Phase 5 structural plasticity knobs. Permanence lives in [0,1]; the
+        // prune thresholds and the tentative init must sit inside it, and a
+        // finite budget is required so growth has somewhere to write.
+        if (self.structural_plasticity_enabled) {
+            if (self.max_out_degree == 0) return error.ZeroConnectionBudget;
+            if (self.target_out_degree > self.max_out_degree)
+                return error.TargetDegreeExceedsBudget;
+            if (self.prune_permanence_min < 0.0 or self.prune_permanence_min > 1.0)
+                return error.BadPrunePermanence;
+            if (self.grow_permanence_init < 0.0 or self.grow_permanence_init > 1.0)
+                return error.BadGrowPermanence;
+            if (self.growth_probability < 0.0 or self.growth_probability > 1.0)
+                return error.BadGrowthProbability;
+            if (self.grow_weight_init < 0.0) return error.NegativeWeight;
+            // A tentative synapse must not be born already prunable, or it would
+            // be deleted the moment its grace period expires with no chance to
+            // consolidate -- defeating the point of growth.
+            if (self.grow_permanence_init < self.prune_permanence_min)
+                return error.TentativeBornPrunable;
         }
     }
 

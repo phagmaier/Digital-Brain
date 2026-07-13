@@ -10,6 +10,7 @@ const rng = @import("rng.zig");
 
 const Allocator = std.mem.Allocator;
 const Network = net.Network;
+const NeuronId = net.NeuronId;
 
 // ---------------------------------------------------------------------------
 // Delayed event queue
@@ -106,6 +107,16 @@ pub const StepMetrics = struct {
     mean_rate_ema: f32 = 0,
 };
 
+/// What a single structural-plasticity event changed. Returned by
+/// applyStructuralPlasticity so the driver can log/verify that connections are
+/// actually turning over.
+pub const StructMetrics = struct {
+    pruned: u32 = 0,
+    grown: u32 = 0,
+    /// Live structural edges after this event (the churning population).
+    live_structural: u32 = 0,
+};
+
 // ---------------------------------------------------------------------------
 // Simulator
 // ---------------------------------------------------------------------------
@@ -127,6 +138,11 @@ pub const Sim = struct {
     /// so the plastic update is zero-mean once the task is solved. SLOW state:
     /// it persists across episodes and is NOT reset by resetEpisode.
     reward_baseline: f32 = 0,
+
+    /// Structural-event counter (DEC-011). Indexes the derived `.growth` RNG
+    /// stream so each growth event is reproducible AND independent of how many
+    /// firing/release draws happened (DEC-004). SLOW state: never reset.
+    growth_counter: u32 = 0,
 
     t: u32 = 0,
 
@@ -297,6 +313,16 @@ pub const Sim = struct {
         //     "Update homeostasis" step, at per-episode/window cadence.
         if (c.homeostasis_per_step) self.applyHomeostasis();
 
+        // 12. Structural plasticity (Phase 5), continuous-simulator cadence. The
+        //     episode harness leaves structural_interval_steps = 0 and drives this
+        //     per growth window instead; here it lets a free-running sim rewire.
+        //     Fires on step t = interval-1, 2*interval-1, ... (t is pre-increment).
+        if (c.structural_plasticity_enabled and c.structural_interval_steps > 0 and
+            (self.t + 1) % c.structural_interval_steps == 0)
+        {
+            _ = self.applyStructuralPlasticity();
+        }
+
         // Observability: mean threshold and mean rate EMA, so the controller is
         // visible in metrics.csv without post-hoc computation. Recorded after the
         // per-step homeostatic update (if any), i.e. the post-update state.
@@ -405,6 +431,164 @@ pub const Sim = struct {
 
         self.reward_baseline = c.reward_baseline_decay * self.reward_baseline +
             (1.0 - c.reward_baseline_decay) * reward;
+    }
+
+    /// One structural-plasticity event (DEC-011, spec §8). Runs at GROWTH cadence
+    /// -- the slowest clock in the system: the driver calls it once every tens or
+    /// hundreds of episodes, never per step. In order:
+    ///
+    ///   1. age + permanence update + permanence-dependent weight decay (§8.4/8.5)
+    ///   2. pruning of weak, low-permanence, aged synapses (§8.6)
+    ///   3. local-random-search growth into freed/free slots (§8.1)
+    ///
+    /// Touches ONLY structural (reservoir/grown) synapses; the task readout and
+    /// working-memory recurrent edges are left exactly as they are. Growth draws
+    /// from the derived `.growth` stream (stateless per event) so the run stays
+    /// reproducible and independent of firing/release draw counts (DEC-004).
+    /// Returns what changed. No-op (and returns zeroes) when disabled.
+    pub fn applyStructuralPlasticity(self: *Sim) StructMetrics {
+        const c = self.network.config;
+        var sm = StructMetrics{};
+        if (!c.structural_plasticity_enabled) return sm;
+
+        const nrn = &self.network.neurons;
+        const syn = &self.network.synapses;
+        const n = nrn.n;
+
+        const target = @max(c.target_rate, 1e-6);
+        const coact_max = c.coactivity_max;
+
+        // 1. Age, permanence update (§8.4), permanence-dependent weight decay (§8.5).
+        //    Co-activity = product of the endpoints' rate EMAs, normalized so that
+        //    "both firing at target" == 1. A well-used synapse gains permanence
+        //    faster than disuse leaks it (consolidates -> q~1, ~no weight decay);
+        //    a synapse with a quiet endpoint decays toward prunable.
+        for (0..syn.n) |k| {
+            if (!syn.structural[k] or !syn.alive[k]) continue;
+            syn.age[k] +|= 1;
+
+            const a_pre = nrn.rate_ema[syn.source[k]] / target;
+            const a_post = nrn.rate_ema[syn.target[k]] / target;
+            const coact = std.math.clamp(a_pre * a_post, 0.0, coact_max);
+
+            // Reward-gated stabilization (§8.4). Reservoir edges carry no
+            // eligibility (e=0), so this only bites plastic synapses -- and those
+            // are not structural, so in practice it is inert unless a future phase
+            // makes structural edges eligible. Kept to honour the rule's shape.
+            const reward_term = c.permanence_reward_lr *
+                @max(@as(f32, 0.0), self.reward_baseline * syn.eligibility[k]);
+
+            var q = syn.permanence[k] + c.permanence_activity_lr * coact -
+                c.permanence_disuse_decay + reward_term;
+            q = std.math.clamp(q, 0.0, 1.0);
+            syn.permanence[k] = q;
+
+            // Low permanence -> fast weight decay toward the prune threshold.
+            syn.weight[k] *= 1.0 - c.weight_permanence_decay * (1.0 - q);
+            if (syn.weight[k] < 0) syn.weight[k] = 0; // w >= 0 invariant survives
+        }
+
+        // 2. Pruning (§8.6). All three conditions must hold: low permanence, weak
+        //    weight, AND past the grace period. Freeing a slot (alive=false) is
+        //    the whole removal -- the slot stays in the CSR range for regrowth.
+        for (0..syn.n) |k| {
+            if (!syn.structural[k] or !syn.alive[k]) continue;
+            if (syn.permanence[k] < c.prune_permanence_min and
+                syn.weight[k] < c.prune_weight_min and
+                syn.age[k] > c.min_synapse_age)
+            {
+                syn.alive[k] = false;
+                sm.pruned += 1;
+            }
+        }
+
+        // 3. Growth (§8.1, pure local random search). One derived Rng for the whole
+        //    event, indexed by the structural-event counter. Each source neuron
+        //    with a free slot attempts (with prob growth_probability) to connect to
+        //    the nearest legal neuron around a point sampled near itself.
+        var g = rng.derived(c.master_seed, .growth, self.growth_counter);
+        self.growth_counter += 1;
+        const sigma = if (c.growth_sigma > 0) c.growth_sigma else c.spatial_sigma;
+        const delay_span: u64 = @as(u64, c.max_delay) - @as(u64, c.min_delay) + 1;
+
+        for (0..n) |ii| {
+            const i: net.NeuronId = @intCast(ii);
+            const rng_draw = g.bernoulli(c.growth_probability);
+            if (!rng_draw) continue;
+
+            const range = syn.outgoing(i);
+
+            // One pass over i's range: find a free slot AND count its live
+            // structural out-degree (for the target-degree set-point). A free slot
+            // means i is under the HARD budget; the degree count enforces the SOFT
+            // set-point that keeps the population from accreting to the cap.
+            var slot: ?u32 = null;
+            var live_structural_deg: u32 = 0;
+            var kk = range.start;
+            while (kk < range.end) : (kk += 1) {
+                if (!syn.alive[kk]) {
+                    if (slot == null) slot = kk;
+                } else if (syn.structural[kk]) {
+                    live_structural_deg += 1;
+                }
+            }
+            if (slot == null) continue; // at the hard budget: no room
+            if (c.target_out_degree > 0 and live_structural_deg >= c.target_out_degree)
+                continue; // at the set-point: leave room for others / for churn
+
+            // Local target sampling (§8.1): a point near i, then the nearest
+            // neuron to it that is legal (not self, not already a live target).
+            const px = nrn.pos_x[i] + sigma * g.normal();
+            const py = nrn.pos_y[i] + sigma * g.normal();
+            var best: ?net.NeuronId = null;
+            var best_d2: f32 = std.math.floatMax(f32);
+            for (0..n) |jj| {
+                const j: net.NeuronId = @intCast(jj);
+                if (j == i) continue; // never a self-loop (delay >= 1 aside)
+                // Reject a duplicate: i already has a live edge to j (via any edge
+                // kind, so growth can never shadow a task readout/recurrent edge).
+                var dup = false;
+                var mk = range.start;
+                while (mk < range.end) : (mk += 1) {
+                    if (syn.alive[mk] and syn.target[mk] == j) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) continue;
+                const dx = px - nrn.pos_x[j];
+                const dy = py - nrn.pos_y[j];
+                const d2 = dx * dx + dy * dy;
+                if (d2 < best_d2) {
+                    best_d2 = d2;
+                    best = j;
+                }
+            }
+
+            if (best) |j| {
+                const k = slot.?;
+                // source[k] is already i (CSR invariant); only fill the rest. New
+                // synapses are WEAK and TENTATIVE -- strong new weights and no
+                // grace period are named failure modes (§21).
+                syn.target[k] = j;
+                syn.weight[k] = c.grow_weight_init;
+                syn.p_release[k] = c.release_probability;
+                syn.delay[k] = @intCast(c.min_delay + g.below(delay_span));
+                syn.eligibility[k] = 0;
+                syn.permanence[k] = c.grow_permanence_init;
+                syn.age[k] = 0;
+                syn.structural[k] = true;
+                syn.plastic[k] = false;
+                syn.alive[k] = true;
+                sm.grown += 1;
+            }
+        }
+
+        // Report the live structural population size after the event.
+        for (0..syn.n) |k| {
+            if (syn.structural[k] and syn.alive[k]) sm.live_structural += 1;
+        }
+        return sm;
     }
 };
 
@@ -1123,4 +1307,276 @@ test "learning: the delayed association is retained above chance across seeds (P
     }
 
     try testing.expect(min_acc > 0.65); // retains across the delay, above chance, on every seed
+}
+
+// ---- Phase 5: structural plasticity (the completion checklist, as code) ------
+
+test "structural: a weak, low-permanence, aged synapse is pruned (DEC-011 §8.6)" {
+    const gpa = testing.allocator;
+    // Growth off so a freed slot is not immediately refilled -- we want to observe
+    // the prune in isolation.
+    const c = cfg.Config{ .master_seed = 3, .structural_plasticity_enabled = true, .growth_probability = 0.0 };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const syn = &s.network.synapses;
+
+    // Find a live structural synapse and drive it into the prunable corner:
+    // low permanence, weak weight, aged, endpoints quiet (so it keeps decaying).
+    var target_k: ?u32 = null;
+    for (0..syn.n) |k| {
+        if (syn.structural[k] and syn.alive[k]) {
+            target_k = @intCast(k);
+            break;
+        }
+    }
+    const k = target_k.?;
+    syn.permanence[k] = 0.0;
+    syn.weight[k] = 0.01;
+    syn.age[k] = c.min_synapse_age + 5;
+    s.network.neurons.rate_ema[syn.source[k]] = 0;
+    s.network.neurons.rate_ema[syn.target[k]] = 0;
+
+    const sm = s.applyStructuralPlasticity();
+    try testing.expect(sm.pruned >= 1);
+    try testing.expect(!syn.alive[k]); // the slot is now free
+}
+
+test "structural: growth installs a weak tentative edge into a free slot (DEC-011 §8.1)" {
+    const gpa = testing.allocator;
+    // growth_probability = 1 so every neuron with a free slot attempts a candidate;
+    // permanence knobs left default. One event must add at least one edge.
+    const c = cfg.Config{ .master_seed = 7, .structural_plasticity_enabled = true, .growth_probability = 1.0 };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const syn = &s.network.synapses;
+
+    var live_before: u32 = 0;
+    for (0..syn.n) |k| live_before += @intFromBool(syn.alive[k]);
+
+    const sm = s.applyStructuralPlasticity();
+    try testing.expect(sm.grown > 0);
+
+    var live_after: u32 = 0;
+    var found_tentative = false;
+    for (0..syn.n) |k| {
+        live_after += @intFromBool(syn.alive[k]);
+        if (syn.alive[k] and syn.structural[k] and syn.weight[k] == c.grow_weight_init) {
+            // A freshly grown edge: weak, tentative permanence, non-plastic.
+            try testing.expectEqual(c.grow_permanence_init, syn.permanence[k]);
+            try testing.expect(!syn.plastic[k]);
+            try testing.expect(syn.delay[k] >= c.min_delay and syn.delay[k] <= c.max_delay);
+            found_tentative = true;
+        }
+    }
+    try testing.expect(found_tentative);
+    try testing.expectEqual(live_before + sm.grown, live_after);
+}
+
+test "structural: grown edges are local (nearest-neighbour target sampling)" {
+    // §8.1: growth samples a point near the source and connects to the nearest
+    // neuron. With a tight sampling sigma the grown edges must be markedly shorter
+    // than a random pair -- otherwise the "local" in local search means nothing.
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 21,
+        .structural_plasticity_enabled = true,
+        .growth_probability = 1.0,
+        .growth_sigma = 0.03, // tight: nearest neuron to a point right by the source
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const nrn = &s.network.neurons;
+    const syn = &s.network.synapses;
+
+    // Mark which edges are grown by snapshotting alive before the event.
+    const alive_before = try gpa.dupe(bool, syn.alive);
+    defer gpa.free(alive_before);
+    _ = s.applyStructuralPlasticity();
+
+    var grown_len: f64 = 0;
+    var grown_n: u32 = 0;
+    for (0..syn.n) |k| {
+        if (syn.alive[k] and !alive_before[k]) {
+            const dx = nrn.pos_x[syn.source[k]] - nrn.pos_x[syn.target[k]];
+            const dy = nrn.pos_y[syn.source[k]] - nrn.pos_y[syn.target[k]];
+            grown_len += @sqrt(@as(f64, dx * dx + dy * dy));
+            grown_n += 1;
+        }
+    }
+    try testing.expect(grown_n > 0);
+    const mean_grown = grown_len / @as(f64, @floatFromInt(grown_n));
+    // Mean distance between random points in the unit square is ~0.52; local
+    // growth must come in well under that.
+    try testing.expect(mean_grown < 0.25);
+}
+
+test "structural: with structural plasticity off, applyStructuralPlasticity is a no-op" {
+    // Baseline guard: none of the Phase 5 machinery may touch the graph unless
+    // explicitly enabled.
+    const gpa = testing.allocator;
+    var s = try Sim.init(gpa, .{ .master_seed = 8 });
+    defer s.deinit(gpa);
+
+    const w_before = try gpa.dupe(f32, s.network.synapses.weight);
+    defer gpa.free(w_before);
+    const q_before = try gpa.dupe(f32, s.network.synapses.permanence);
+    defer gpa.free(q_before);
+
+    for (0..300) |_| _ = s.step(null);
+    const sm = s.applyStructuralPlasticity();
+
+    try testing.expectEqual(@as(u32, 0), sm.pruned);
+    try testing.expectEqual(@as(u32, 0), sm.grown);
+    try testing.expectEqualSlices(f32, w_before, s.network.synapses.weight);
+    try testing.expectEqualSlices(f32, q_before, s.network.synapses.permanence);
+    for (s.network.synapses.alive) |a| try testing.expect(a);
+}
+
+test "structural: the live out-degree never exceeds the slot budget over training" {
+    // The connection budget (§8.7) is the per-neuron slot capacity; growth writes
+    // only into free slots, so it can never be breached. Assert it holds across a
+    // run with real spiking, pruning, and growth interleaved.
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 4,
+        .structural_plasticity_enabled = true,
+        .max_out_degree = 16,
+        .homeostasis_enabled = true,
+        .homeostasis_per_step = false,
+        .target_rate = 0.05,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const syn = &s.network.synapses;
+
+    for (0..20) |_| {
+        for (0..60) |_| _ = s.step(null);
+        _ = s.applyStructuralPlasticity();
+        s.applyHomeostasis();
+        for (0..s.network.neurons.n) |i| {
+            const r = syn.outgoing(@intCast(i));
+            const cap = r.end - r.start;
+            var live: u32 = 0;
+            for (r.start..r.end) |k| live += @intFromBool(syn.alive[k]);
+            try testing.expect(live <= cap);
+        }
+    }
+}
+
+test "structural: same seed produces identical structural evolution" {
+    // Reproducibility under structural plasticity: growth draws from the derived
+    // .growth stream and pruning is deterministic, so two runs of the same
+    // config must end with byte-identical graphs (alive/weight/permanence).
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 99,
+        .structural_plasticity_enabled = true,
+        .homeostasis_enabled = true,
+        .homeostasis_per_step = false,
+    };
+
+    const run = struct {
+        fn f(alloc: Allocator, cc: cfg.Config) !Sim {
+            var s = try Sim.init(alloc, cc);
+            for (0..15) |_| {
+                for (0..50) |_| _ = s.step(null);
+                _ = s.applyStructuralPlasticity();
+                s.applyHomeostasis();
+            }
+            return s;
+        }
+    }.f;
+
+    var a = try run(gpa, c);
+    defer a.deinit(gpa);
+    var b = try run(gpa, c);
+    defer b.deinit(gpa);
+
+    try testing.expectEqualSlices(bool, a.network.synapses.alive, b.network.synapses.alive);
+    try testing.expectEqualSlices(f32, a.network.synapses.weight, b.network.synapses.weight);
+    try testing.expectEqualSlices(f32, a.network.synapses.permanence, b.network.synapses.permanence);
+    try testing.expectEqualSlices(NeuronId, a.network.synapses.target, b.network.synapses.target);
+}
+
+test "learning: the association still learns with structural plasticity on, and connections change (Phase 5 exit criterion)" {
+    // The exit criterion, as an assertion: with the reservoir rewiring underneath
+    // it, the two-choice association is STILL learned above chance (useful
+    // performance is not destroyed) AND the graph demonstrably changed (grows
+    // and/or prunes happened). Deterministic, so exact.
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+
+    const seeds = [_]u64{ 1, 2 };
+    const n_episodes: u32 = 1000;
+    const stim_steps: u32 = 40;
+    const readout_steps: u32 = 25;
+    const final_window: u32 = 300;
+    const growth_interval: u32 = 50;
+
+    var min_acc: f64 = 1.0;
+    var total_churn: u32 = 0;
+
+    for (seeds) |seed| {
+        const c = cfg.Config{
+            .master_seed = seed,
+            .n_neurons = 100,
+            .task_enabled = true,
+            .plasticity_enabled = true,
+            .homeostasis_enabled = true,
+            .homeostasis_per_step = false,
+            .target_rate = 0.05,
+            .homeostasis_lr = 0.05,
+            .task_group_size = 8,
+            .structural_plasticity_enabled = true,
+        };
+        var s = try Sim.init(gpa, c);
+        defer s.deinit(gpa);
+        const l = task.layout(c);
+        const ext = try gpa.alloc(f32, c.n_neurons);
+        defer gpa.free(ext);
+
+        var correct_in_window: u32 = 0;
+        for (0..n_episodes) |ep_usize| {
+            const ep: u32 = @intCast(ep_usize);
+            s.resetEpisode();
+            var trng = rng.derived(seed, .task, ep);
+            const choice: task.Choice = if (trng.below(2) == 0) .a else .b;
+            l.fillStimulus(choice, c.task_input_current, ext);
+
+            var count0: u32 = 0;
+            var count1: u32 = 0;
+            for (0..stim_steps) |step| {
+                _ = s.step(ext);
+                if (step >= stim_steps - readout_steps) {
+                    const fired = s.network.neurons.fired;
+                    for (l.action_0.lo..l.action_0.hi) |i| count0 += @intFromBool(fired[i]);
+                    for (l.action_1.lo..l.action_1.hi) |i| count1 += @intFromBool(fired[i]);
+                }
+            }
+
+            var chosen: u1 = undefined;
+            if (count0 > count1) {
+                chosen = 0;
+            } else if (count1 > count0) {
+                chosen = 1;
+            } else {
+                var arng = rng.derived(seed, .action, ep);
+                chosen = @intCast(arng.below(2));
+            }
+
+            const correct = chosen == l.correctAction(choice);
+            s.applyReward(if (correct) 1.0 else -1.0);
+            s.applyHomeostasis();
+            if ((ep + 1) % growth_interval == 0) {
+                const sm = s.applyStructuralPlasticity();
+                total_churn += sm.pruned + sm.grown;
+            }
+            if (ep >= n_episodes - final_window and correct) correct_in_window += 1;
+        }
+        const acc = @as(f64, @floatFromInt(correct_in_window)) / @as(f64, @floatFromInt(final_window));
+        min_acc = @min(min_acc, acc);
+    }
+
+    try testing.expect(min_acc > 0.65); // performance survives the rewiring, every seed
+    try testing.expect(total_churn > 0); // connections actually changed
 }

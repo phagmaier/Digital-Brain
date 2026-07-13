@@ -94,17 +94,26 @@ pub const Logger = struct {
         }
     }
 
+    /// One row per synapse. The Phase 5 columns (permanence, alive, structural)
+    /// are what let you watch the graph rewire; with structural plasticity off
+    /// they are constant (permanence 0.5, alive 1, structural per edge kind) and
+    /// every row is a live edge, exactly as before Phase 5. When it is on, dead
+    /// free slots (alive 0) are skipped -- only real connections are written.
     pub fn writeSynapses(s: *const sim.Sim, w: *std.Io.Writer) !void {
-        try w.print("id,source,target,weight,delay,p_release\n", .{});
+        try w.print("id,source,target,weight,delay,p_release,permanence,alive,structural\n", .{});
         const syn = &s.network.synapses;
         for (0..syn.n) |k| {
-            try w.print("{d},{d},{d},{d:.5},{d},{d:.5}\n", .{
+            if (!syn.alive[k]) continue; // free slot, not a real connection
+            try w.print("{d},{d},{d},{d:.5},{d},{d:.5},{d:.5},{d},{d}\n", .{
                 k,
                 syn.source[k],
                 syn.target[k],
                 syn.weight[k],
                 syn.delay[k],
                 syn.p_release[k],
+                syn.permanence[k],
+                @intFromBool(syn.alive[k]),
+                @intFromBool(syn.structural[k]),
             });
         }
     }
@@ -151,10 +160,15 @@ pub const Summary = struct {
         const cf = @as(f64, @floatFromInt(@max(counted, 1)));
         const nf = @as(f64, @floatFromInt(n));
 
+        // Live synapses, not total slots: with structural plasticity a padded CSR
+        // carries dead free slots that are not real connections.
+        var live_synapses: u32 = 0;
+        for (s.network.synapses.alive) |a| live_synapses += @intFromBool(a);
+
         return .{
             .steps = @intCast(lg.steps.items.len),
             .n_neurons = n,
-            .n_synapses = s.network.synapses.n,
+            .n_synapses = live_synapses,
             .mean_firing_rate = @as(f64, @floatFromInt(spike_total)) / (cf * nf),
             .spikes_per_step = @as(f64, @floatFromInt(spike_total)) / cf,
             .silent_fraction = @as(f64, @floatFromInt(silent)) / nf,

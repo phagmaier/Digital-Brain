@@ -123,6 +123,51 @@ with the delay ≥ 1 on the self-excitation, not a bug.
 
 ---
 
+## Phase 5 — structural plasticity
+
+**A padded CSR makes growth free.** The whole reproducibility architecture rests
+on a fixed, source-sorted CSR adjacency — which naïvely fights adding and removing
+edges. The fix is to *never resize it*: over-allocate each source neuron a fixed
+slot budget (`max_out_degree`), pack its live edges at the front, and leave the
+rest as dead free slots. Pruning frees a slot; growth fills a free slot **inside
+the same neuron's range**. `out_start` never moves, traversal stays in stable
+array order, and the connection budget falls out for free (it's the slot count).
+With the feature off, capacity = live count, so the build is byte-identical to
+Phase 4. This one layout decision is what let Phase 5 be an *addition*, not a
+rewrite — and the reservoir's RNG stream is provably unperturbed (padding draws
+no RNG), the same guarantee the task and self-excitation already had.
+
+**In a homeostatic, task-active network, disuse-pruning is *rare* — and that's
+correct, not a bug.** Our first instinct was "connections change" ⇒ lots of
+churn. But homeostasis keeps essentially every neuron near `target_rate`, so
+essentially every synapse is "used," its permanence pins high, and it is *not*
+prunable. Aggressive pruning would delete useful connectivity. So Phase 5's real
+regime is **growth-dominated exploration with a trickle of pruning**: the graph
+enriches (here ~790 → ~940 live reservoir edges, ~20% more, different topology)
+while consolidation protects what works. This is the tentative/established/
+consolidated story (§8.3) playing out honestly.
+
+**Accretion needs a set-point, or it fills the budget.** Left alone, growth just
+climbs to the hard slot cap and stops — a denser fixed graph, not turnover. The
+doc's own connection-budget list has the fix: a **target out-degree** (§8.7).
+Growth stops adding to a neuron once it hits the target; pruning frees room and
+growth refills it, so the live population plateaus around a set point instead of
+accreting. Same trick as the homeostatic *rate* set-point, one level up — at the
+level of *structure* rather than *activity*.
+
+**The exit criterion is a three-way AND, and stability is relative.** "Connections
+change while activity remains stable and performance is not destroyed" only means
+something as a conjunction, so the `grow` harness ANDs all three: churn > 0,
+firing rate in a healthy band, and task accuracy still above chance (vs a
+structural-off control). One subtlety we got wrong first: the *absolute* firing
+rate peaks ~0.2 during stimulus injection — with **or without** structural
+plasticity. An absolute ceiling was testing the task, not the mechanism. The
+honest stability test is **relative**: rewiring must not push the peak materially
+above the no-rewiring control's peak (and must not go dead). With that, all four
+seeds pass at 100% accuracy — identical to the control — while the reservoir
+rewires underneath. Homeostasis is doing the real work of keeping it stable; the
+pairing (rewire + regulate) *is* the result.
+
 ## Cross-cutting engineering notes
 
 - **Every phase's mechanism is off by default.** The Phase 1 baseline run is
@@ -144,5 +189,13 @@ with the delay ≥ 1 on the self-excitation, not a bug.
   care about episodes-to-criterion.
 - A true attractor working memory (bistability) if delays need to be effectively
   unbounded (see Phase 4 note).
-- The recurrent reservoir itself is never trained — later structural-growth phases
-  (P5+) are where that could change.
+- The recurrent reservoir's *weights* are still never trained — Phase 5 changes
+  its *topology* (grow/prune) but grown edges are non-plastic and fixed-weight.
+  Making structural edges eligible (reward-gated permanence, the `permanence_reward_lr`
+  term we left at 0) is the natural next lever if reservoir credit assignment
+  matters.
+- Phase 5's pruning is disuse-driven and therefore quiet in a homeostatic network.
+  If a later phase wants *visible* turnover (e.g. to study forgetting), the lever
+  is an activity-biased or error-biased growth heuristic (§8.8 #2/#4) plus a
+  co-activity signal measured during a quiet baseline, not the stimulus-inflated
+  rate EMA we read at the growth window.

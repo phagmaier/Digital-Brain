@@ -196,6 +196,26 @@ pub fn build(b: *std.Build) void {
         delay_cmd.addArgs(args);
     }
 
+    // The Phase 5 structural-plasticity experiment (rewiring exit criterion).
+    // Invoked with `zig build grow`.
+    const grow_exe = b.addExecutable(.{
+        .name = "grow",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/grow.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(grow_exe);
+
+    const grow_step = b.step("grow", "Run the structural-plasticity rewiring experiment -> structural.csv");
+    const grow_cmd = b.addRunArtifact(grow_exe);
+    grow_step.dependOn(&grow_cmd.step);
+    grow_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        grow_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

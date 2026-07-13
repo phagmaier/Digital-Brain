@@ -1,0 +1,10 @@
+{
+  "master_seed": 12648430,
+  "n_neurons": 100,
+  "steps": 20000,
+  "homeostasis_enabled": true,
+  "target_rate": 0.05,
+  "homeostasis_lr": 0.05,
+  "structural_plasticity_enabled": true,
+  "structural_interval_steps": 500
+}
