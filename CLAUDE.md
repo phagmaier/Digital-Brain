@@ -91,5 +91,8 @@ The tests in `sim.zig` and `net.zig` aren't incidental coverage — they encode 
 
 ## Additional information if needed
 
-Note that if you are ever confused about terms or about what we are building and the specifications of what we are building there is a very large detailed obsidian note that explains the project and every phase. Note that it is very long and detailed though only query/search inside it when you are confused and need more information. Here is the path to that file: 
-/home/phagmaier/Documents/Obsidian/"Digital Brain Project"/"Brain Inspired Local Learning System.md"
+Note that if you are ever confused about terms or about what we are building and the specifications of what we are building there is a very large detailed obsidian note that explains the project and every phase. Note that it is very long and detailed though only query/search inside it when you are confused and need more information you can look at implimentation_doc.md
+
+## Findings
+
+Findings through stages 0-4 are in the file findings.md
