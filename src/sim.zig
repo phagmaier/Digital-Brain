@@ -555,8 +555,13 @@ pub const Sim = struct {
             // pathways that are reliably correct. Raw reward keeps consolidating a
             // correct pathway (r=+1, e>0) for as long as it stays useful.
             if (c.consolidation_enabled) {
+                // Default: raw reward `r` (DEC-012). The centered variant uses the
+                // same baseline-subtracted modulator the weight update uses, which
+                // report.md §5 asks to compare directly -- it stops consolidating
+                // once the task is mastered (modulator -> 0).
+                const cons_signal = if (c.consolidation_use_centered_reward) modulator else reward;
                 syn.permanence[k] = std.math.clamp(
-                    syn.permanence[k] + c.consolidation_lr * @max(@as(f32, 0.0), reward * syn.eligibility[k]),
+                    syn.permanence[k] + c.consolidation_lr * @max(@as(f32, 0.0), cons_signal * syn.eligibility[k]),
                     0.0,
                     1.0,
                 );

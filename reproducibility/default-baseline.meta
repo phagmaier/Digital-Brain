@@ -1,6 +1,6 @@
 schema_version=1
-baseline_parent_commit=4a84530ddc92af99e1b7f90a9d78a715041a0440
-baseline_change=stage0-hardening
+baseline_parent_commit=97e9056a9fc41a88821826b11c4c91e0b815efd5
+baseline_change=stage1-consolidation-centered-reward-field
 config_source=src/main.zig built-in defaults
 master_seed=12648430
 prng_algorithm=xoshiro256++
@@ -9,5 +9,10 @@ zig_version=0.16.0
 artifact_manifest=default-baseline.sha256
 expected_summary=default-summary.txt
 
+# Only run_meta.json changed from the stage0 baseline: Stage 1 added the
+# consolidation_use_centered_reward config field, which RunMetadata serializes.
+# The dynamics artefacts (raster/metrics/neurons/synapses) are byte-identical,
+# so the Phase-1 baseline is unchanged; PRNG impl version did not move.
+#
 # A commit cannot contain its own final hash. The parent commit plus the commit
 # containing this manifest identify the exact source transition reproducibly.

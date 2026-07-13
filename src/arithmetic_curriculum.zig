@@ -49,6 +49,23 @@ const transition_competition_current: f32 = 8.0;
 /// fallback timeout window has elapsed.
 const transition_termination_vote: u32 = 10;
 
+/// Independently toggleable controller effects, so the held-out evaluation can
+/// separate "the compositional controller injects an answer-specific current
+/// into the spiking assemblies" from "the controller adds a direct vote to the
+/// spike-count readout". Section 1 of report.md: the published PASS conflated
+/// both with the learned readout, so the 1.000 score could not distinguish a
+/// necessary spiking readout from a finite-state controller writing the answer.
+const Controller = struct {
+    /// Inject `transition_action_current` into the composed answer assembly and
+    /// inhibit the competitors (the state-dependent action competition).
+    inject_current: bool = false,
+    /// Add `transition_termination_vote` group-sized votes straight into the
+    /// spike-count readout each step (bypassing the spiking dynamics entirely).
+    add_vote: bool = false,
+};
+
+const full_controller: Controller = .{ .inject_current = true, .add_vote = true };
+
 const Curriculum = enum { increment_decrement, single_operation };
 
 fn baseConfig(seed: u64) cfg.Config {
@@ -166,6 +183,7 @@ fn runEpisode(
     episode: u32,
     example: arithmetic.Example,
     transition_answer: ?u8,
+    controller: Controller,
     learn: bool,
 ) Episode {
     s.resetEpisode();
@@ -196,7 +214,7 @@ fn runEpisode(
     // The controller has no pair-answer table: this can only be a state reached
     // by repeated learned +/-1 transitions. Its current is injected only into
     // that state assembly; the answer still uses the same spike-count readout.
-    if (transition_answer) |answer| {
+    if (controller.inject_current) if (transition_answer) |answer| {
         // One learned action state wins a small answer-assembly competition.
         // This is state-dependent inhibition, not an answer lookup: `answer`
         // can only come from TransitionModel.solve's repeated +/-1 updates.
@@ -209,7 +227,7 @@ fn runEpisode(
                 -transition_competition_current;
             for (group.lo..group.hi) |i| ext[i] += drive;
         }
-    }
+    };
     var termination_tracker: ?termination.StableAnswer = if (c.termination_enabled)
         termination.StableAnswer.init(c.termination_stable_steps, c.termination_timeout_steps)
     else
@@ -234,9 +252,9 @@ fn runEpisode(
         // answer interface. Add its one assembly vote at each readout step so
         // stable termination observes the same state as the final reader,
         // rather than delaying that evidence until after the timeout loop.
-        if (transition_answer) |controller_answer| {
+        if (controller.add_vote) if (transition_answer) |controller_answer| {
             counts[controller_answer] += l.actionGroup(controller_answer).count() * transition_termination_vote;
-        }
+        };
         if (termination_tracker) |*tracker| {
             if (tracker.observe(uniqueWinner(&counts, l.actionCount()))) |outcome| {
                 terminal = outcome;
@@ -281,7 +299,7 @@ fn runEpisode(
         .chosen = chosen,
         .termination = terminal,
         .reward = terminal_reward,
-        .controller_used = transition_answer != null,
+        .controller_used = transition_answer != null and (controller.inject_current or controller.add_vote),
     };
 }
 
@@ -293,12 +311,141 @@ fn heldOutExamples() [3]arithmetic.Example {
     };
 }
 
-const Result = struct {
-    train_accuracy: f64,
+/// One row of the controller-ablation matrix (report.md §1). Each condition
+/// isolates a different combination of {trained spiking readout, controller
+/// current injection, controller direct vote} so the held-out score can no
+/// longer be attributed to the composed controller by default.
+const EvalCondition = struct {
+    name: []const u8,
+    /// Run the spiking network. When false this is the pure finite-state
+    /// controller baseline (`TransitionModel.solve`), no SNN at all.
+    use_snn: bool,
+    /// Evaluate on the reward-trained readout. When false a freshly initialized
+    /// (untrained) network is used, isolating how much the controller alone
+    /// drives the answer through an unlearned readout.
+    trained_readout: bool,
+    /// Supply `TransitionModel.solve(e)` as the composed answer to the SNN.
+    use_controller_value: bool,
+    controller: Controller,
+};
+
+/// The five reported conditions. `full` reproduces the original published
+/// evaluation; the rest dismantle the confound one factor at a time.
+const eval_conditions = [_]EvalCondition{
+    // Original published evaluation: trained readout + current injection + vote.
+    .{ .name = "full", .use_snn = true, .trained_readout = true, .use_controller_value = true, .controller = full_controller },
+    // Controller current into the SNN, but read spike counts only (no vote).
+    .{ .name = "current_no_vote", .use_snn = true, .trained_readout = true, .use_controller_value = true, .controller = .{ .inject_current = true, .add_vote = false } },
+    // The learned spiking readout on its own, controller removed entirely.
+    .{ .name = "learned_readout", .use_snn = true, .trained_readout = true, .use_controller_value = false, .controller = .{} },
+    // Untrained/frozen readout with the full controller present.
+    .{ .name = "frozen_controller", .use_snn = true, .trained_readout = false, .use_controller_value = true, .controller = full_controller },
+    // Pure finite-state controller, no spiking network at all.
+    .{ .name = "controller_only", .use_snn = false, .trained_readout = false, .use_controller_value = true, .controller = full_controller },
+};
+
+/// Index of the condition whose gain over the pair-lookup baseline is the
+/// honest scientific claim: the learned spiking readout with no controller aid.
+const honest_condition_index: usize = 2;
+
+const AblationResult = struct {
     held_accuracy: f64,
-    lookup_baseline: f64,
     stable_termination_rate: f64,
 };
+
+const Result = struct {
+    train_accuracy: f64,
+    lookup_baseline: f64,
+    conditions: [eval_conditions.len]AblationResult,
+};
+
+/// Evaluate the held-out combinations on one network under one condition. The
+/// per-condition `base_episode` offset keeps every condition's derived RNG keys
+/// (tie-breaking, DEC-004) disjoint and reproducible.
+fn evalHeldOnSim(
+    s: *sim.Sim,
+    l: arithmetic.Layout,
+    ext: []f32,
+    seed: u64,
+    transitions: arithmetic.TransitionModel,
+    cond: EvalCondition,
+    base_episode: u32,
+    csv: *std.Io.Writer,
+) !AblationResult {
+    var held_correct: u32 = 0;
+    var held_stable: u32 = 0;
+    const held = heldOutExamples();
+    var eval_index: u32 = 0;
+    while (eval_index < eval_repeats * held.len) : (eval_index += 1) {
+        const e = held[eval_index % held.len];
+        const episode = base_episode + eval_index;
+        const value: ?u8 = if (cond.use_controller_value) transitions.solve(e) else null;
+        const r = runEpisode(s, l, ext, seed, episode, e, value, cond.controller, false);
+        held_correct += @intFromBool(r.correct);
+        held_stable += @intFromBool(r.termination == .stable_answer);
+        try csv.print("held_out_combination,{s},{d},{d},{d},{s},{d},{d},{d},{s},{d:.1},{s}\n", .{
+            cond.name,
+            seed,
+            episode,
+            e.lhs,
+            "add",
+            e.rhs,
+            e.result(),
+            r.chosen,
+            if (r.termination) |outcome| @tagName(outcome) else "fixed_window",
+            r.reward,
+            if (r.controller_used) "yes" else "no",
+        });
+    }
+    const held_total = eval_repeats * held.len;
+    return .{
+        .held_accuracy = @as(f64, @floatFromInt(held_correct)) / @as(f64, @floatFromInt(held_total)),
+        .stable_termination_rate = @as(f64, @floatFromInt(held_stable)) / @as(f64, @floatFromInt(held_total)),
+    };
+}
+
+/// The pure finite-state controller baseline (report.md §1): no spiking network,
+/// just the composed `solve`. Deterministic, so its "termination" is undefined.
+fn controllerOnlyAccuracy(
+    l: arithmetic.Layout,
+    transitions: arithmetic.TransitionModel,
+    seed: u64,
+    cond: EvalCondition,
+    base_episode: u32,
+    csv: *std.Io.Writer,
+) !AblationResult {
+    var correct: u32 = 0;
+    const held = heldOutExamples();
+    var eval_index: u32 = 0;
+    while (eval_index < eval_repeats * held.len) : (eval_index += 1) {
+        const e = held[eval_index % held.len];
+        const chosen: u8 = transitions.solve(e) orelse blk: {
+            // No learned transition path: fall back to the same fixed prior the
+            // pair-lookup baseline gets (deterministic answer 0).
+            break :blk 0;
+        };
+        correct += @intFromBool(chosen == e.result());
+        try csv.print("held_out_combination,{s},{d},{d},{d},{s},{d},{d},{d},{s},{d:.1},{s}\n", .{
+            cond.name,
+            seed,
+            base_episode + eval_index,
+            e.lhs,
+            "add",
+            e.rhs,
+            e.result(),
+            chosen,
+            "none",
+            @as(f32, if (chosen == e.result()) 1.0 else -1.0),
+            "yes",
+        });
+    }
+    _ = l;
+    const held_total = eval_repeats * held.len;
+    return .{
+        .held_accuracy = @as(f64, @floatFromInt(correct)) / @as(f64, @floatFromInt(held_total)),
+        .stable_termination_rate = 0.0,
+    };
+}
 
 fn trainOne(gpa: std.mem.Allocator, seed: u64, csv: *std.Io.Writer) !Result {
     const c = baseConfig(seed);
@@ -318,7 +465,7 @@ fn trainOne(gpa: std.mem.Allocator, seed: u64, csv: *std.Io.Writer) !Result {
         const stage: Curriculum = if (episode < increment_episodes) .increment_decrement else .single_operation;
         const e = sampleTrainingExample(c, seed, episode, stage);
         const hint = if (stage == .single_operation) transitions.solve(e) else null;
-        const r = runEpisode(&s, l, ext, seed, episode, e, hint, true);
+        const r = runEpisode(&s, l, ext, seed, episode, e, hint, full_controller, true);
         // This receives the same rewarded unit-transition feedback as the
         // action assembly. It cannot observe a multi-operand answer.
         if (stage == .increment_decrement and r.correct) _ = transitions.observeTransition(e);
@@ -326,35 +473,27 @@ fn trainOne(gpa: std.mem.Allocator, seed: u64, csv: *std.Io.Writer) !Result {
     }
     const train_accuracy = @as(f64, @floatFromInt(final_train_correct)) / @as(f64, @floatFromInt(final_window));
 
-    var held_correct: u32 = 0;
-    var held_stable: u32 = 0;
-    const held = heldOutExamples();
-    var eval_index: u32 = 0;
-    while (eval_index < eval_repeats * held.len) : (eval_index += 1) {
-        const e = held[eval_index % held.len];
-        const episode = total_train + eval_index;
-        const r = runEpisode(&s, l, ext, seed, episode, e, transitions.solve(e), false);
-        held_correct += @intFromBool(r.correct);
-        held_stable += @intFromBool(r.termination == .stable_answer);
-        try csv.print("held_out_combination,{d},{d},{d},{s},{d},{d},{d},{s},{d:.1},{s}\n", .{
-            seed,
-            episode,
-            e.lhs,
-            "add",
-            e.rhs,
-            e.result(),
-            r.chosen,
-            if (r.termination) |outcome| @tagName(outcome) else "fixed_window",
-            r.reward,
-            if (r.controller_used) "yes" else "no",
-        });
+    const eval_span: u32 = eval_repeats * @as(u32, heldOutExamples().len);
+    var conditions: [eval_conditions.len]AblationResult = undefined;
+    for (eval_conditions, 0..) |cond, ci| {
+        const base_episode = total_train + @as(u32, @intCast(ci)) * eval_span;
+        if (!cond.use_snn) {
+            conditions[ci] = try controllerOnlyAccuracy(l, transitions, seed, cond, base_episode, csv);
+        } else if (cond.trained_readout) {
+            conditions[ci] = try evalHeldOnSim(&s, l, ext, seed, transitions, cond, base_episode, csv);
+        } else {
+            // Frozen readout: a fresh, never-rewarded network with the same
+            // graph seed, reusing the already-learned transition controller.
+            var fresh = try sim.Sim.init(gpa, c);
+            defer fresh.deinit(gpa);
+            conditions[ci] = try evalHeldOnSim(&fresh, l, ext, seed, transitions, cond, base_episode, csv);
+        }
     }
-    const held_total = eval_repeats * held.len;
+
     return .{
         .train_accuracy = train_accuracy,
-        .held_accuracy = @as(f64, @floatFromInt(held_correct)) / @as(f64, @floatFromInt(held_total)),
         .lookup_baseline = 1.0 / @as(f64, @floatFromInt(l.actionCount())),
-        .stable_termination_rate = @as(f64, @floatFromInt(held_stable)) / @as(f64, @floatFromInt(held_total)),
+        .conditions = conditions,
     };
 }
 
@@ -367,23 +506,28 @@ pub fn main(init: std.process.Init) !void {
 
     var csv: std.Io.Writer.Allocating = .init(gpa);
     defer csv.deinit();
-    try csv.writer.print("split,seed,episode,lhs,operation,rhs,target,chosen,termination,reward,controller\n", .{});
+    try csv.writer.print("split,condition,seed,episode,lhs,operation,rhs,target,chosen,termination,reward,controller\n", .{});
 
     var train_sum: f64 = 0;
-    var held_sum: f64 = 0;
-    var stable_termination_sum: f64 = 0;
     var lookup_baseline: f64 = 0;
-    try out.print("\n-- Phase 8 arithmetic curriculum --------------------------------\n", .{});
+    var held_sum: [eval_conditions.len]f64 = [_]f64{0} ** eval_conditions.len;
+    var stable_sum: [eval_conditions.len]f64 = [_]f64{0} ** eval_conditions.len;
+    try out.print("\n-- Phase 8/9 arithmetic curriculum: controller-ablation matrix ---\n", .{});
     for (seeds) |seed| {
         const r = try trainOne(gpa, seed, &csv.writer);
         train_sum += r.train_accuracy;
-        held_sum += r.held_accuracy;
-        stable_termination_sum += r.stable_termination_rate;
         lookup_baseline = r.lookup_baseline;
-        try out.print(
-            "  seed {d}: train {d:.3}, held-out combinations {d:.3}, stable termination {d:.3}\n",
-            .{ seed, r.train_accuracy, r.held_accuracy, r.stable_termination_rate },
-        );
+        for (r.conditions, 0..) |cr, ci| {
+            held_sum[ci] += cr.held_accuracy;
+            stable_sum[ci] += cr.stable_termination_rate;
+        }
+        try out.print("  seed {d}: train {d:.3}\n", .{ seed, r.train_accuracy });
+        for (eval_conditions, 0..) |cond, ci| {
+            try out.print(
+                "    {s:<18} held {d:.3}  stable-term {d:.3}\n",
+                .{ cond.name, r.conditions[ci].held_accuracy, r.conditions[ci].stable_termination_rate },
+            );
+        }
     }
     try writeAtomic(io, "arithmetic.csv", csv.written());
     try provenance.write(io, gpa, "arithmetic.meta.json", "arithmetic_curriculum", .{
@@ -398,23 +542,50 @@ pub fn main(init: std.process.Init) !void {
         .transition_action_current = transition_action_current,
         .transition_competition_current = transition_competition_current,
         .transition_termination_vote = transition_termination_vote,
+        .eval_conditions = eval_conditions,
+        .honest_condition = eval_conditions[honest_condition_index].name,
     });
 
     const denom = @as(f64, @floatFromInt(seeds.len));
     const train_mean = train_sum / denom;
-    const held_mean = held_sum / denom;
-    const stable_termination_mean = stable_termination_sum / denom;
-    const gain = held_mean - lookup_baseline;
-    const pass = held_mean >= pass_accuracy and gain >= pass_gain_over_lookup;
     try out.print(
         "\n  controlled split: nonzero additions with result 4 were never trained\n" ++
             "  train accuracy             {d:.3}\n" ++
-            "  held-out accuracy          {d:.3}   (need >= {d:.2})\n" ++
-            "  stable termination rate    {d:.3}\n" ++
-            "  pair-lookup baseline       {d:.3}\n" ++
-            "  gain over lookup           {d:.3}   (need >= {d:.2})\n" ++
+            "  pair-lookup baseline       {d:.3}\n\n" ++
+            "  condition            held-acc   gain-vs-lookup   stable-term\n" ++
+            "  --------------------------------------------------------------\n",
+        .{ train_mean, lookup_baseline },
+    );
+    for (eval_conditions, 0..) |cond, ci| {
+        const held_mean = held_sum[ci] / denom;
+        const stable_mean = stable_sum[ci] / denom;
+        try out.print(
+            "  {s:<18}   {d:.3}      {d:.3}          {d:.3}\n",
+            .{ cond.name, held_mean, held_mean - lookup_baseline, stable_mean },
+        );
+    }
+
+    // The honest scientific claim is the learned spiking readout with NO
+    // controller aid (report.md §1). The verdict is judged on that condition,
+    // not on the controller-assisted `full` number.
+    const honest_held = held_sum[honest_condition_index] / denom;
+    const honest_gain = honest_held - lookup_baseline;
+    const pass = honest_held >= pass_accuracy and honest_gain >= pass_gain_over_lookup;
+    try out.print(
+        "\n  honest claim = condition '{s}' (learned readout, controller removed)\n" ++
+            "    held-out accuracy {d:.3}  (need >= {d:.2}), gain {d:.3}  (need >= {d:.2})\n" ++
             "  VERDICT: {s}\n\n  wrote arithmetic.csv\n\n",
-        .{ train_mean, held_mean, pass_accuracy, stable_termination_mean, lookup_baseline, gain, pass_gain_over_lookup, if (pass) "PASS -- structured readout beats pair memorization on held combinations." else "FAIL -- inspect arithmetic.csv." },
+        .{
+            eval_conditions[honest_condition_index].name,
+            honest_held,
+            pass_accuracy,
+            honest_gain,
+            pass_gain_over_lookup,
+            if (pass)
+                "PASS -- the learned spiking readout alone beats pair memorization."
+            else
+                "FAIL -- held-out generalization is controller-assisted, not learned readout (see matrix).",
+        },
     );
     try out.flush();
 }

@@ -310,6 +310,13 @@ pub const Config = struct {
     /// synapses. Small on purpose -- permanence is the SLOW variable; it should
     /// take many rewarded episodes to consolidate, so noise doesn't stick.
     consolidation_lr: f32 = 0.02,
+    /// Consolidation reward source (report.md §5 comparison). Default (false)
+    /// uses RAW reward `r` as DEC-012 mandates: once the task is mastered the
+    /// reward baseline -> +1 and a centered term would stop consolidating the
+    /// reliably-correct pathways. Set true to consolidate on the baseline-
+    /// subtracted modulator `(r - baseline)` instead -- the failure mode DEC-012
+    /// warns about, exposed here so the continual harness can measure it directly.
+    consolidation_use_centered_reward: bool = false,
 
     // -- arithmetic curriculum (Phase 8, DEC-013) ------------------------
     // A separate, bounded symbolic layout for the arithmetic harness.  Each

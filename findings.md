@@ -206,6 +206,23 @@ baseline`. Raw reward keeps consolidating a correct pathway for as long as it st
 correct. The lesson: the baseline that makes *learning* stable is poison for
 *consolidation*; they want opposite signals from the same reward.
 
+**Directly measured, the raw-vs-centered story is subtler than "centered fails"
+(report.md §5).** The harness now runs a third `centered` condition
+(`consolidation_use_centered_reward = true`) alongside `raw` and `off`, so the two
+consolidation signals are compared head-to-head rather than argued from first
+principles. The structural signature is exactly as predicted — centered
+consolidation produces **~0 fully-consolidated-band synapses** (permanence never
+reaches q ≥ 0.6, because the modulator collapses to 0 once mastered) where raw
+produces ~150–250. But **A-retest accuracy is statistically identical** (raw −
+centered = 0.001 ± 0.001), because *both sit at the 1.000 retest ceiling* on this
+two-choice task: the permanence centered accrues *early* in block A, before the
+baseline saturates, is already enough to carry the pathway through block B's
+disuse. So on this task the raw-vs-centered difference is real in the permanence
+bands and invisible at the behavioural readout — the retest metric is
+ceiling-limited and cannot separate them. A task with a longer or more
+interfering block B, where partial permanence is not enough to survive, is what
+would turn the band-level difference into a behavioural one.
+
 **Reward-gated for plastic, activity-gated for reservoir — and the distinction is
 principled, not incidental.** §8.3 defines consolidated as "repeatedly associated
 with *rewarded behaviour*," and §8.4 warns against consolidating a synapse merely
@@ -221,8 +238,10 @@ that makes the exit criterion trivial to measure.** §8.3 says the state "need n
 be an enum; it can emerge from thresholds over permanence." Taking that literally:
 after block A we tag each plastic synapse consolidated (q ≥ 0.6) or tentative
 (q ≤ 0.4), then after block B (disuse) count how many of each are still alive. The
-result is clean and stark — consolidated survival ~0.97, tentative survival ~0.00.
-Trying instead to measure survival by *weight* was noisy and misleading: a
+result is clean and stark — over 17 mastered seeds the consolidated − tentative
+survival gap is **0.951 ± 0.045** (95% CI, raw consolidation), i.e. consolidated
+survival ≈ 0.95 against tentative ≈ 0.00. Trying instead to measure survival by
+*weight* was noisy and misleading: a
 functionally-intact pathway (retest accuracy 1.0) can sit at a tiny absolute weight
 (0.08 is enough to win a readout), so weight magnitude hides the survival signal
 that the alive/pruned distinction shows plainly.
@@ -232,8 +251,28 @@ consolidation is *what* preserves the pathway, the OFF condition keeps the entir
 forgetting apparatus (plastic edges still decay and prune) and only zeroes
 `consolidation_lr`. Then the two conditions share identical decay dynamics and
 differ solely in whether reward consolidates permanence — so the A-retest gap
-(on 1.00 vs off 0.86) is attributable to consolidation alone, not to some
-difference in how aggressively the two conditions forget.
+(raw − off = **0.282 ± 0.119**, 95% CI over 17 mastered seeds) is attributable to
+consolidation alone, not to some difference in how aggressively the two conditions
+forget.
+
+**The protocol was hardened per report.md §5, and the causal claim is now a lesion,
+not just a survival correlation.** Four changes: (1) block A trains to a *mastery
+criterion* (0.90 rolling accuracy) rather than a fixed length, so a weak block-A
+fit cannot masquerade as forgetting — the earlier fixed-length run left two seeds
+at 0.47/0.74 accuracy; (2) seeds that never master block A within the cap are
+reported separately and **excluded from the verdict** (3/20 here: seeds 1, 3, 14);
+(3) the sample is **20 paired seeds** with 95% confidence intervals, and the
+verdict is judged on the CI *lower bound*, not the point estimate; (4) a
+**pathway-specific lesion** — after retest, the plastic `input_a → action_0`
+readout weights are zeroed and A is retested again. This is the causal test the
+survival contrast alone could not give: permanence is *definitionally* what
+resists pruning, so "high-permanence synapses survive" is partly built into the
+rule. The lesion asks the functional question directly — is the retained A
+behaviour actually carried by that specific consolidated pathway? It is: zeroing
+it drops raw-consolidation retest by **0.943 ± 0.112** (retest ≈ 0.94 → ≈ 0.00),
+while under OFF the same lesion costs only 0.183 because the pathway had already
+decayed and the residual A-retest was near chance. Consolidation does not merely
+correlate with a surviving band; it builds the pathway the behaviour depends on.
 
 ## Phase 7 — workspace broadcast
 
@@ -300,15 +339,39 @@ smaller configured penalty (default `-0.2`). The scalar is sent through the
 existing eligibility-trace `applyReward()` path; Phase 9 adds no second learning
 rule and consumes no RNG, so reproducibility is preserved.
 
-**The held-out result decisively exceeds exact-pair memorization on the stated
-split.** Training excludes every nonzero addition with result four
-(`1+3`, `2+2`, `3+1`) while retaining the needed unit transitions and examples
-that produce answer four. Frozen evaluation over 4 seeds × 240 held trials
-reported **1.000** mean accuracy. An exact ordered-pair lookup has no entry for
-any held example and its fixed 9-answer prior is **1/9 = 0.111**; the measured
-gain was **+0.889** (criteria: held accuracy ≥ 0.30 and gain ≥ 0.18). This is a
-controlled composition result, not a random train/test split whose answers could
-be memorized.
+**The held-out result is controller-driven, not learned-readout generalization
+— the ablation matrix isolates this.** Training excludes every nonzero addition
+with result four (`1+3`, `2+2`, `3+1`) while retaining the needed unit transitions
+and examples that produce answer four. The original harness reported **1.000**
+mean held-out accuracy, but that number combined three effects that report.md §1
+flagged as conflated: the trained spiking readout, an answer-specific current
+injected into the composed answer assembly (`transition_action_current = 100`),
+and a *direct vote* the controller adds straight into the spike-count readout
+(`transition_termination_vote`). The harness now reports the five-condition
+ablation matrix (`zig build arithmetic`, 4 seeds × 240 held trials each):
+
+| condition | held-acc | gain vs lookup (0.111) | stable-term |
+|---|---|---|---|
+| `full` (original) | 1.000 | +0.889 | 1.000 |
+| `current_no_vote` (controller current into SNN, spike counts only) | 0.116 | +0.005 | 0.000 |
+| `learned_readout` (trained readout, controller removed) | 0.118 | +0.007 | 0.000 |
+| `frozen_controller` (untrained readout, full controller) | 1.000 | +0.889 | 1.000 |
+| `controller_only` (finite-state `solve`, no SNN) | 1.000 | +0.889 | 0.000 |
+
+The reading is unambiguous. The pure finite-state controller scores 1.000 with
+no network at all, and an **untrained** network plus the controller also scores
+1.000 — so the composed answer, not any learned spiking readout, produces the
+result. The learned readout *on its own* sits at the 1/9 lookup prior (0.118 vs
+0.111), and injecting the controller's current into the readout without the direct
+vote does not lift it (0.116). "Stable termination" likewise depends entirely on
+the direct vote: it is 1.000 with the vote and 0.000 without it, so it is
+**evidence-triggered termination over controller-assisted answers, not learned
+termination** (report.md §1). The harness verdict is now judged on the honest
+condition (`learned_readout`) and therefore **FAILs** by design — this failure is
+the corrected scientific claim, not a regression. The genuine, defensible result
+is the `controller_only` line: bounded single-operation arithmetic is solved by
+composing rewarded unit transitions, beating an exact-pair lookup on the
+controlled split. The spiking substrate does not yet carry that computation.
 
 **Fixed-duration readout is an important boundary condition.** Each answer is
 read from a preconfigured final window rather than a learned stop signal. During
@@ -358,7 +421,12 @@ experiment.
   broadcast result. Multi-item access, interference, and a learned admission
   policy remain open experiments; preserve the one-flag ablation before adding
   any of them.
-- Phase 8 proves bounded transition composition against an exact-pair baseline,
-  not open-ended arithmetic or an emergent reservoir algorithm. Stronger claims
-  need larger ranges, independently held results/operators, and ablations of the
-  transition controller and teaching current.
+- Phase 8's controller ablation matrix is now the honest record: bounded
+  transition composition (the `controller_only` finite-state baseline) beats an
+  exact-pair lookup, but the spiking readout carries none of that computation —
+  isolated, it sits at the 1/9 prior, and the frozen-network condition scores
+  1.000 on the controller alone. The open task is making the *spiking substrate*
+  perform the composition: a plastic recurrent/readout path that generalizes on
+  the held split with the controller removed, over larger ranges and
+  independently held results/operators. This is the entry point to Stage 2's
+  context-dependent delayed task.
