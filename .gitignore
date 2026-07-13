@@ -1,5 +1,7 @@
 .zig-cache/
 zig-out/
-*.csv 
-*.png
 
+# Generated per-run artefacts (regenerable via zig build run/sweep/perturb/train/delay).
+*.csv
+*.png
+run_meta.json

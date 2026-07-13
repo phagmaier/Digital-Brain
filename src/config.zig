@@ -188,6 +188,12 @@ pub const Config = struct {
     task_input_current: f32 = 1.5, // stimulus drive into the active input group
     task_ia_weight_init: f32 = 0.2, // initial (symmetric) input->action weight
     task_ia_p_release: f32 = 1.0, // reliable readout pathway
+    /// Phase 4 working memory. Fixed all-to-all self-excitation WITHIN each input
+    /// group. A stimulus kicks its input assembly on; this recurrent excitation
+    /// (bounded by the threshold homeostat) sustains the assembly's activity
+    /// after the stimulus is removed, so the input->action readout still reflects
+    /// the stimulus after a delay. 0 disables it (the Phase 3 immediate regime).
+    task_recurrent_weight: f32 = 0.0,
 
     // -- run --------------------------------------------------------------
     steps: u32 = 2000,

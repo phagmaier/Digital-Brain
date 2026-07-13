@@ -1032,3 +1032,95 @@ test "learning: the two-choice association is learned above chance across seeds 
     try testing.expect(min_acc > 0.65); // every seed clearly above chance
     try testing.expect(mean_acc > 0.75);
 }
+
+// ---- Phase 4: delayed learning / working memory -----------------------------
+//
+// The retention mechanism (stimulus-specific persistence) is an EMERGENT
+// property of self-excitation + the homeostatic threshold tuning that training
+// installs -- a fresh, untrained network with these knobs is globally saturated
+// and shows no specificity. So the honest test of the mechanism is behavioural
+// and end-to-end: the delayed association is learned above chance only because
+// the assembly holds the stimulus across the delay. The memory-vs-reservoir A/B
+// (the mechanism's necessity) is demonstrated in the delay harness, where at the
+// target delay the reservoir alone decays to near chance.
+
+test "learning: the delayed association is retained above chance across seeds (Phase 4 exit criterion)" {
+    // The exit criterion: with a NONZERO delay, the network still learns the
+    // association above chance. This only works because the input assembly holds
+    // the stimulus through the delay (the previous test) -- with self-excitation
+    // off, this same delay decays the reservoir to chance (shown in the delay
+    // harness). Deterministic, so the accuracies are exact.
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+
+    const seeds = [_]u64{ 1, 2 };
+    const n_episodes: u32 = 1200;
+    const stim_steps: u32 = 30;
+    const delay_steps: u32 = 20; // nonzero, past the bare reservoir's fading memory
+    const readout_steps: u32 = 20;
+    const final_window: u32 = 300;
+
+    var min_acc: f64 = 1.0;
+
+    for (seeds) |seed| {
+        const c = cfg.Config{
+            .master_seed = seed,
+            .n_neurons = 100,
+            .task_enabled = true,
+            .plasticity_enabled = true,
+            .homeostasis_enabled = true,
+            .homeostasis_per_step = false,
+            .target_rate = 0.05,
+            .homeostasis_lr = 0.05,
+            .task_group_size = 8,
+            .task_recurrent_weight = 0.5,
+            .eligibility_decay = 0.95,
+            .adaptation_enabled = false,
+        };
+        var s = try Sim.init(gpa, c);
+        defer s.deinit(gpa);
+        const l = task.layout(c);
+        const ext = try gpa.alloc(f32, c.n_neurons);
+        defer gpa.free(ext);
+
+        var correct_in_window: u32 = 0;
+        for (0..n_episodes) |ep_usize| {
+            const ep: u32 = @intCast(ep_usize);
+            s.resetEpisode();
+            var trng = rng.derived(seed, .task, ep);
+            const choice: task.Choice = if (trng.below(2) == 0) .a else .b;
+            l.fillStimulus(choice, c.task_input_current, ext);
+
+            for (0..stim_steps) |_| _ = s.step(ext);
+            for (0..delay_steps) |_| _ = s.step(null);
+
+            var count0: u32 = 0;
+            var count1: u32 = 0;
+            for (0..readout_steps) |_| {
+                _ = s.step(null);
+                const fired = s.network.neurons.fired;
+                for (l.action_0.lo..l.action_0.hi) |i| count0 += @intFromBool(fired[i]);
+                for (l.action_1.lo..l.action_1.hi) |i| count1 += @intFromBool(fired[i]);
+            }
+
+            var chosen: u1 = undefined;
+            if (count0 > count1) {
+                chosen = 0;
+            } else if (count1 > count0) {
+                chosen = 1;
+            } else {
+                var arng = rng.derived(seed, .action, ep);
+                chosen = @intCast(arng.below(2));
+            }
+
+            const correct = chosen == l.correctAction(choice);
+            s.applyReward(if (correct) 1.0 else -1.0);
+            s.applyHomeostasis();
+            if (ep >= n_episodes - final_window and correct) correct_in_window += 1;
+        }
+        const acc = @as(f64, @floatFromInt(correct_in_window)) / @as(f64, @floatFromInt(final_window));
+        min_acc = @min(min_acc, acc);
+    }
+
+    try testing.expect(min_acc > 0.65); // retains across the delay, above chance, on every seed
+}

@@ -21,6 +21,10 @@ const NeuronKind = cfg.NeuronKind;
 pub const NeuronId = u32;
 pub const SynapseId = u32;
 
+/// What kind of edge the builder is emitting. Build-time only; at runtime the
+/// distinction survives as `plastic[]` (readout) and the weight values.
+const EdgeKind = enum { reservoir, recurrent, readout };
+
 // ---------------------------------------------------------------------------
 // Neurons
 // ---------------------------------------------------------------------------
@@ -196,11 +200,13 @@ pub const Network = struct {
         defer src.deinit(gpa);
         var dst = try std.ArrayList(NeuronId).initCapacity(gpa, n * 8);
         defer dst.deinit(gpa);
-        // Parallel flag: is this a task input->action synapse (plastic, fixed
-        // weight) rather than a random reservoir synapse? Kept alongside src/dst
-        // so the fill loop below can branch without re-deriving group membership.
-        var is_task = try std.ArrayList(bool).initCapacity(gpa, n * 8);
-        defer is_task.deinit(gpa);
+        // Parallel tag: what KIND of edge is this? Kept alongside src/dst so the
+        // fill loop can branch without re-deriving group membership.
+        //   reservoir -- random graph edge, RNG-drawn weight/delay (Phase 1)
+        //   recurrent -- fixed input-group self-excitation (Phase 4 memory)
+        //   readout   -- plastic input->action synapse (Phase 3)
+        var edge_kind = try std.ArrayList(EdgeKind).initCapacity(gpa, n * 8);
+        defer edge_kind.deinit(gpa);
         const task_layout = task.layout(c);
 
         const two_sigma_sq = 2.0 * c.spatial_sigma * c.spatial_sigma;
@@ -242,28 +248,43 @@ pub const Network = struct {
                 if (r.float01() < @min(p, 1.0)) {
                     src.appendAssumeCapacity(@intCast(i));
                     dst.appendAssumeCapacity(@intCast(j));
-                    is_task.appendAssumeCapacity(false);
+                    edge_kind.appendAssumeCapacity(.reservoir);
                 }
             }
 
-            // Task edges: emit input->action synapses for this source RIGHT HERE,
-            // while we are on source i, so the combined edge list stays sorted by
-            // source and CSR still falls out with no sort. The action neurons are
-            // the contiguous range [action_0.lo, action_1.hi). No RNG is drawn, so
+            // Task edges: emit this input source's edges RIGHT HERE, while we are
+            // on source i, so the combined list stays sorted by source and CSR
+            // still falls out with no sort. No RNG is drawn for any of them, so
             // the random reservoir's stream is identical to a non-task build.
             if (c.task_enabled and task_layout.isInput(@intCast(i))) {
+                // Recurrent self-excitation within the same input group (Phase 4
+                // working memory): i -> every other neuron of its input group.
+                if (c.task_recurrent_weight > 0) {
+                    const grp = if (task_layout.input_a.contains(@intCast(i)))
+                        task_layout.input_a
+                    else
+                        task_layout.input_b;
+                    var k2: u32 = grp.lo;
+                    while (k2 < grp.hi) : (k2 += 1) {
+                        if (k2 == @as(u32, @intCast(i))) continue;
+                        try src.append(gpa, @intCast(i));
+                        try dst.append(gpa, k2);
+                        try edge_kind.append(gpa, .recurrent);
+                    }
+                }
+                // Plastic readout: i -> every action neuron ([action_0.lo, action_1.hi)).
                 var a: u32 = task_layout.action_0.lo;
                 while (a < task_layout.action_1.hi) : (a += 1) {
                     try src.append(gpa, @intCast(i));
                     try dst.append(gpa, a);
-                    try is_task.append(gpa, true);
+                    try edge_kind.append(gpa, .readout);
                 }
             }
 
             // Grow eagerly rather than assuming capacity forever.
             try src.ensureUnusedCapacity(gpa, n);
             try dst.ensureUnusedCapacity(gpa, n);
-            try is_task.ensureUnusedCapacity(gpa, n);
+            try edge_kind.ensureUnusedCapacity(gpa, n);
         }
 
         const m: u32 = @intCast(src.items.len);
@@ -294,23 +315,33 @@ pub const Network = struct {
             syn.source[k] = s;
             syn.target[k] = dst.items[k];
 
-            if (is_task.items[k]) {
-                // Task input->action synapse: deterministic and plastic. Draws NO
-                // RNG (see above), fixed shortest delay for an immediate readout.
-                // Source is always excitatory (input groups are the low IDs), so
-                // the effect is excitatory and the weight starts positive.
-                syn.weight[k] = c.task_ia_weight_init;
-                syn.p_release[k] = c.task_ia_p_release;
-                syn.delay[k] = c.min_delay;
-                syn.plastic[k] = c.plasticity_enabled; // learns only when plasticity is on
-            } else {
-                syn.weight[k] = switch (neurons.kind[s]) {
-                    .excitatory => r.range(c.w_exc_init_lo, c.w_exc_init_hi),
-                    .inhibitory => r.range(c.w_inh_init_lo, c.w_inh_init_hi),
-                };
-                syn.p_release[k] = c.release_probability;
-                syn.delay[k] = @intCast(c.min_delay + r.below(delay_span));
-                syn.plastic[k] = false; // the random reservoir is fixed; only task edges learn
+            // Task edges draw NO RNG (see above), so the reservoir's stream is
+            // unchanged. Their sources are always excitatory (input groups are the
+            // low IDs), so the effect is excitatory and weights start positive.
+            switch (edge_kind.items[k]) {
+                .readout => {
+                    // Plastic input->action readout (Phase 3). Shortest delay.
+                    syn.weight[k] = c.task_ia_weight_init;
+                    syn.p_release[k] = c.task_ia_p_release;
+                    syn.delay[k] = c.min_delay;
+                    syn.plastic[k] = c.plasticity_enabled; // learns only when plasticity is on
+                },
+                .recurrent => {
+                    // Fixed input-group self-excitation (Phase 4 working memory).
+                    syn.weight[k] = c.task_recurrent_weight;
+                    syn.p_release[k] = c.task_ia_p_release;
+                    syn.delay[k] = c.min_delay;
+                    syn.plastic[k] = false;
+                },
+                .reservoir => {
+                    syn.weight[k] = switch (neurons.kind[s]) {
+                        .excitatory => r.range(c.w_exc_init_lo, c.w_exc_init_hi),
+                        .inhibitory => r.range(c.w_inh_init_lo, c.w_inh_init_hi),
+                    };
+                    syn.p_release[k] = c.release_probability;
+                    syn.delay[k] = @intCast(c.min_delay + r.below(delay_span));
+                    syn.plastic[k] = false; // the random reservoir is fixed; only readout edges learn
+                },
             }
 
             syn.eligibility[k] = 0;
@@ -483,4 +514,31 @@ test "net: enabling the task does not perturb the random reservoir's RNG stream"
         pk += 1;
     }
     try testing.expectEqual(plain.synapses.n, @as(u32, @intCast(pk)));
+}
+
+test "net: input-group self-excitation adds the expected fixed recurrent edges (Phase 4)" {
+    const gpa = testing.allocator;
+    const g: u32 = 8;
+    var without = try Network.build(gpa, .{ .master_seed = 5, .task_enabled = true, .task_group_size = g });
+    defer without.deinit(gpa);
+    var with = try Network.build(gpa, .{ .master_seed = 5, .task_enabled = true, .task_group_size = g, .task_recurrent_weight = 0.5 });
+    defer with.deinit(gpa);
+
+    // Self-excitation is all-to-all within each input group, no self-loops:
+    // g*(g-1) directed edges per group, two groups.
+    try testing.expectEqual(2 * g * (g - 1), with.synapses.n - without.synapses.n);
+
+    // The added edges are within-input-group, fixed at the recurrent weight, non-plastic.
+    const l = task.layout(.{ .task_group_size = g });
+    var found: u32 = 0;
+    for (0..with.synapses.n) |k| {
+        const src = with.synapses.source[k];
+        const dst = with.synapses.target[k];
+        const same_group = (l.input_a.contains(src) and l.input_a.contains(dst)) or
+            (l.input_b.contains(src) and l.input_b.contains(dst));
+        if (same_group and src != dst and with.synapses.weight[k] == 0.5 and !with.synapses.plastic[k]) {
+            found += 1;
+        }
+    }
+    try testing.expect(found >= 2 * g * (g - 1));
 }
