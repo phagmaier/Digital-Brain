@@ -139,6 +139,36 @@ pub const Config = struct {
         if (self.w_exc_init_hi < self.w_exc_init_lo or self.w_inh_init_hi < self.w_inh_init_lo)
             return error.BadWeightRange;
     }
+
+    /// Load a Config from a JSON file. Accepts EITHER a bare Config object or a
+    /// full run_meta.json (which nests the config under "config"), so any past
+    /// run can be replayed by pointing at the run_meta.json it emitted. Missing
+    /// fields fall back to the struct defaults, so a config file need only list
+    /// the knobs it overrides.
+    pub fn loadFromFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !Config {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
+        defer gpa.free(bytes);
+        return parseJson(gpa, bytes);
+    }
+
+    /// See `loadFromFile`. Split out so it can be unit-tested without touching
+    /// the filesystem.
+    pub fn parseJson(gpa: std.mem.Allocator, bytes: []const u8) !Config {
+        // Try the run_meta.json shape first: { "config": { ... }, ... }.
+        // ignore_unknown_fields lets us skip the metadata siblings (prng, zig
+        // version). A bare Config document has no "config" key, so this parse
+        // leaves `config` null and we fall through to the bare parse below.
+        const Wrapper = struct { config: ?Config = null };
+        if (std.json.parseFromSlice(Wrapper, gpa, bytes, .{ .ignore_unknown_fields = true })) |parsed| {
+            defer parsed.deinit();
+            if (parsed.value.config) |c| return c;
+        } else |_| {}
+
+        // Otherwise the whole document is a bare Config object.
+        const parsed = try std.json.parseFromSlice(Config, gpa, bytes, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        return parsed.value;
+    }
 };
 
 /// Written next to every run. If you cannot reconstruct the run from this,
@@ -175,4 +205,31 @@ test "config: negative weights are rejected" {
 test "config: neuron sign convention" {
     try std.testing.expectEqual(@as(f32, 1.0), NeuronKind.excitatory.sign());
     try std.testing.expectEqual(@as(f32, -1.0), NeuronKind.inhibitory.sign());
+}
+
+test "config: parseJson reads a bare Config object and applies defaults for the rest" {
+    const c = try Config.parseJson(std.testing.allocator,
+        \\{ "master_seed": 42, "n_neurons": 7, "reset_rule": "hard" }
+    );
+    try std.testing.expectEqual(@as(u64, 42), c.master_seed);
+    try std.testing.expectEqual(@as(u32, 7), c.n_neurons);
+    try std.testing.expectEqual(ResetRule.hard, c.reset_rule);
+    // A field the document did not mention keeps its default.
+    try std.testing.expectEqual(@as(f32, 0.8), c.excitatory_fraction);
+}
+
+test "config: parseJson round-trips through run metadata (replay a run_meta.json)" {
+    // Serialize a config the way a real run does, then parse it back from the
+    // run_meta.json shape. The recovered config must match, which is what makes
+    // replay-from-metadata trustworthy.
+    const original = Config{ .master_seed = 0xABCDEF, .n_neurons = 33, .steps = 123 };
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try (RunMetadata{ .config = original }).write(&out.writer);
+
+    const recovered = try Config.parseJson(std.testing.allocator, out.written());
+    try std.testing.expectEqual(original.master_seed, recovered.master_seed);
+    try std.testing.expectEqual(original.n_neurons, recovered.n_neurons);
+    try std.testing.expectEqual(original.steps, recovered.steps);
 }

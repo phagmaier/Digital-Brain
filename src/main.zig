@@ -19,14 +19,30 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    // Phase 1 defaults. Edit here, or (later) load from JSON -- the point is
-    // that whatever you use gets written into run_meta.json below, so the run
-    // is reconstructible.
-    const config = cfg.Config{
-        .master_seed = 0xC0FFEE,
-        .n_neurons = 100,
-        .steps = 3000,
-    };
+    // Optional first argument: a path to a JSON config (a bare Config object,
+    // or a run_meta.json to replay). Whatever we use gets written back into
+    // run_meta.json below, so every run stays reconstructible.
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const config_path: ?[]const u8 = if (argv.len > 1) argv[1] else null;
+
+    const config = if (config_path) |path|
+        cfg.Config.loadFromFile(io, gpa, path) catch |err| {
+            var ebuf: [512]u8 = undefined;
+            var estderr = std.Io.File.stderr().writer(io, &ebuf);
+            try estderr.interface.print(
+                "error: could not load config '{s}': {s}\n",
+                .{ path, @errorName(err) },
+            );
+            try estderr.interface.flush();
+            return err;
+        }
+    else
+        // Phase 1 defaults, used when no config file is given.
+        cfg.Config{
+            .master_seed = 0xC0FFEE,
+            .n_neurons = 100,
+            .steps = 3000,
+        };
 
     try config.validate();
 
@@ -57,6 +73,10 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
     try summary.print(&stdout.interface);
+    try stdout.interface.print(
+        "  config             {s}\n",
+        .{config_path orelse "built-in defaults"},
+    );
     try stdout.interface.print(
         "  wrote raster.csv, metrics.csv, neurons.csv, synapses.csv, run_meta.json\n\n",
         .{},

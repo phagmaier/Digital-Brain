@@ -115,6 +115,27 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // The parameter-sweep harness. A second executable (its own root module)
+    // that runs the simulator across a grid of configs and writes sweep.csv.
+    // Invoked with `zig build sweep`.
+    const sweep_exe = b.addExecutable(.{
+        .name = "sweep",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sweep.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(sweep_exe);
+
+    const sweep_step = b.step("sweep", "Run the parameter sweep -> sweep.csv");
+    const sweep_cmd = b.addRunArtifact(sweep_exe);
+    sweep_step.dependOn(&sweep_cmd.step);
+    sweep_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        sweep_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
