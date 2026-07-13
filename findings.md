@@ -168,6 +168,49 @@ seeds pass at 100% accuracy — identical to the control — while the reservoir
 rewires underneath. Homeostasis is doing the real work of keeping it stable; the
 pairing (rewire + regulate) *is* the result.
 
+## Phase 6 — consolidation
+
+**Consolidation must use RAW reward, not the baseline-subtracted modulator — this
+was the whole ballgame.** The weight update (DEC-009) subtracts a running reward
+baseline so it goes zero-mean once the task is solved; that is load-bearing for
+weight *stability*. But we first wired the permanence-consolidation term to the
+same modulator, and it silently failed on exactly the seeds that learned fastest:
+once mastered, baseline → +1, modulator → 0, so nothing consolidated (one seed
+finished block A with *zero* consolidated synapses despite 100% accuracy). The fix
+is what §8.4 actually says — `η_q·max(0, r·e)` uses the reward `r`, not `r −
+baseline`. Raw reward keeps consolidating a correct pathway for as long as it stays
+correct. The lesson: the baseline that makes *learning* stable is poison for
+*consolidation*; they want opposite signals from the same reward.
+
+**Reward-gated for plastic, activity-gated for reservoir — and the distinction is
+principled, not incidental.** §8.3 defines consolidated as "repeatedly associated
+with *rewarded behaviour*," and §8.4 warns against consolidating a synapse merely
+because it changes/fires a lot. So plastic readout edges consolidate on reward
+(they carry eligibility); reservoir edges consolidate on co-activity (they don't).
+Concretely, under consolidation the slow loop gives plastic edges disuse-decay
+*only* — their positive drive is the reward bump in `applyReward`, never mere
+co-activity. Without this split, an actively-firing-but-useless readout synapse
+would consolidate, which is exactly the failure the doc flags.
+
+**"Tentative / established / consolidated" really are just permanence bands, and
+that makes the exit criterion trivial to measure.** §8.3 says the state "need not
+be an enum; it can emerge from thresholds over permanence." Taking that literally:
+after block A we tag each plastic synapse consolidated (q ≥ 0.6) or tentative
+(q ≤ 0.4), then after block B (disuse) count how many of each are still alive. The
+result is clean and stark — consolidated survival ~0.97, tentative survival ~0.00.
+Trying instead to measure survival by *weight* was noisy and misleading: a
+functionally-intact pathway (retest accuracy 1.0) can sit at a tiny absolute weight
+(0.08 is enough to win a readout), so weight magnitude hides the survival signal
+that the alive/pruned distinction shows plainly.
+
+**The clean control is the reward term, not the whole mechanism.** To show
+consolidation is *what* preserves the pathway, the OFF condition keeps the entire
+forgetting apparatus (plastic edges still decay and prune) and only zeroes
+`consolidation_lr`. Then the two conditions share identical decay dynamics and
+differ solely in whether reward consolidates permanence — so the A-retest gap
+(on 1.00 vs off 0.86) is attributable to consolidation alone, not to some
+difference in how aggressively the two conditions forget.
+
 ## Cross-cutting engineering notes
 
 - **Every phase's mechanism is off by default.** The Phase 1 baseline run is
@@ -191,9 +234,9 @@ pairing (rewire + regulate) *is* the result.
   unbounded (see Phase 4 note).
 - The recurrent reservoir's *weights* are still never trained — Phase 5 changes
   its *topology* (grow/prune) but grown edges are non-plastic and fixed-weight.
-  Making structural edges eligible (reward-gated permanence, the `permanence_reward_lr`
-  term we left at 0) is the natural next lever if reservoir credit assignment
-  matters.
+  Reward-gated permanence exists (Phase 6, DEC-012) but only on the *plastic*
+  readout edges; making *reservoir* edges eligible so reward can consolidate them
+  too is the natural next lever if reservoir credit assignment matters.
 - Phase 5's pruning is disuse-driven and therefore quiet in a homeostatic network.
   If a later phase wants *visible* turnover (e.g. to study forgetting), the lever
   is an activity-biased or error-biased growth heuristic (§8.8 #2/#4) plus a

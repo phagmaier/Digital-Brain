@@ -388,7 +388,7 @@ pub const Sim = struct {
 
         // Eligibility first, using the pre-this-step traces.
         for (0..syn.n) |k| {
-            if (!syn.plastic[k]) continue;
+            if (!syn.plastic[k] or !syn.alive[k]) continue; // a pruned readout carries no credit
             var e = c.eligibility_decay * syn.eligibility[k];
             // LTP: post fires now, credit presynaptic activity that led up to it.
             if (nrn.fired[syn.target[k]]) e += nrn.pre_trace[syn.source[k]];
@@ -421,12 +421,33 @@ pub const Sim = struct {
 
         const modulator = reward - self.reward_baseline;
         for (0..syn.n) |k| {
-            if (!syn.plastic[k]) continue;
+            if (!syn.plastic[k] or !syn.alive[k]) continue;
             syn.weight[k] = std.math.clamp(
                 syn.weight[k] + c.learning_rate * modulator * syn.eligibility[k],
                 0.0,
                 c.weight_max_plastic,
             );
+
+            // Consolidation (Phase 6, DEC-012): rewarded-eligible plastic synapses
+            // slowly ratchet their PERMANENCE up (§8.4's eta_q*max(0, r*e) term).
+            // This is the bridge from the fast weight timescale to the slow
+            // structure timescale -- a pathway that is repeatedly part of rewarded
+            // behaviour consolidates, and later resists the disuse decay + pruning
+            // that erodes unused pathways. The weight is fast; permanence is slow.
+            //
+            // NOTE: this uses the RAW reward, not the baseline-subtracted modulator
+            // the weight update uses. That is deliberate and matches §8.4: once the
+            // task is mastered the reward baseline -> +1 and the modulator -> 0, so
+            // a baseline-subtracted term would STOP consolidating exactly the
+            // pathways that are reliably correct. Raw reward keeps consolidating a
+            // correct pathway (r=+1, e>0) for as long as it stays useful.
+            if (c.consolidation_enabled) {
+                syn.permanence[k] = std.math.clamp(
+                    syn.permanence[k] + c.consolidation_lr * @max(@as(f32, 0.0), reward * syn.eligibility[k]),
+                    0.0,
+                    1.0,
+                );
+            }
         }
 
         self.reward_baseline = c.reward_baseline_decay * self.reward_baseline +
@@ -458,32 +479,45 @@ pub const Sim = struct {
         const target = @max(c.target_rate, 1e-6);
         const coact_max = c.coactivity_max;
 
+        // Which synapses this slow clock manages: reservoir/grown edges always,
+        // and -- under consolidation (Phase 6, DEC-012) -- the plastic readout
+        // edges too, so an unused readout pathway can forget. Their permanence is
+        // driven differently: reservoir by ACTIVITY (co-activity here), plastic by
+        // REWARD (applied per episode in applyReward); both share disuse decay,
+        // permanence-dependent weight decay, and pruning.
+        const manages = struct {
+            fn f(cc: cfg.Config, s: *const net.Synapses, k: usize) bool {
+                if (!s.alive[k]) return false;
+                return s.structural[k] or (cc.consolidation_enabled and s.plastic[k]);
+            }
+        }.f;
+
         // 1. Age, permanence update (§8.4), permanence-dependent weight decay (§8.5).
         //    Co-activity = product of the endpoints' rate EMAs, normalized so that
-        //    "both firing at target" == 1. A well-used synapse gains permanence
-        //    faster than disuse leaks it (consolidates -> q~1, ~no weight decay);
-        //    a synapse with a quiet endpoint decays toward prunable.
+        //    "both firing at target" == 1. A well-used (or consolidated) synapse
+        //    keeps its permanence high and barely decays; a quiet, unconsolidated
+        //    one decays toward prunable.
         for (0..syn.n) |k| {
-            if (!syn.structural[k] or !syn.alive[k]) continue;
+            if (!manages(c, syn, k)) continue;
             syn.age[k] +|= 1;
 
-            const a_pre = nrn.rate_ema[syn.source[k]] / target;
-            const a_post = nrn.rate_ema[syn.target[k]] / target;
-            const coact = std.math.clamp(a_pre * a_post, 0.0, coact_max);
+            // Activity term applies to reservoir edges only. Plastic edges get
+            // their positive drive from reward (applyReward), not from mere
+            // co-activity -- §8.4/§8.3: don't consolidate on activity alone.
+            var gain: f32 = 0;
+            if (syn.structural[k]) {
+                const a_pre = nrn.rate_ema[syn.source[k]] / target;
+                const a_post = nrn.rate_ema[syn.target[k]] / target;
+                const coact = std.math.clamp(a_pre * a_post, 0.0, coact_max);
+                gain = c.permanence_activity_lr * coact;
+            }
 
-            // Reward-gated stabilization (§8.4). Reservoir edges carry no
-            // eligibility (e=0), so this only bites plastic synapses -- and those
-            // are not structural, so in practice it is inert unless a future phase
-            // makes structural edges eligible. Kept to honour the rule's shape.
-            const reward_term = c.permanence_reward_lr *
-                @max(@as(f32, 0.0), self.reward_baseline * syn.eligibility[k]);
-
-            var q = syn.permanence[k] + c.permanence_activity_lr * coact -
-                c.permanence_disuse_decay + reward_term;
+            var q = syn.permanence[k] + gain - c.permanence_disuse_decay;
             q = std.math.clamp(q, 0.0, 1.0);
             syn.permanence[k] = q;
 
-            // Low permanence -> fast weight decay toward the prune threshold.
+            // Low permanence -> fast weight decay toward the prune threshold. This
+            // is the forgetting pressure; consolidation (q~1) is what resists it.
             syn.weight[k] *= 1.0 - c.weight_permanence_decay * (1.0 - q);
             if (syn.weight[k] < 0) syn.weight[k] = 0; // w >= 0 invariant survives
         }
@@ -492,7 +526,7 @@ pub const Sim = struct {
         //    weight, AND past the grace period. Freeing a slot (alive=false) is
         //    the whole removal -- the slot stays in the CSR range for regrowth.
         for (0..syn.n) |k| {
-            if (!syn.structural[k] or !syn.alive[k]) continue;
+            if (!manages(c, syn, k)) continue;
             if (syn.permanence[k] < c.prune_permanence_min and
                 syn.weight[k] < c.prune_weight_min and
                 syn.age[k] > c.min_synapse_age)
@@ -1579,4 +1613,251 @@ test "learning: the association still learns with structural plasticity on, and 
 
     try testing.expect(min_acc > 0.65); // performance survives the rewiring, every seed
     try testing.expect(total_churn > 0); // connections actually changed
+}
+
+// ---- Phase 6: consolidation (the completion checklist, as code) --------------
+
+test "consolidation: reward ratchets up the permanence of a rewarded plastic synapse" {
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 1,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .structural_plasticity_enabled = true,
+        .growth_probability = 0.0,
+        .consolidation_enabled = true,
+        .consolidation_lr = 0.1,
+        .task_group_size = 8,
+        .background_current = 0.6,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = task.layout(c);
+
+    const ext = try gpa.alloc(f32, c.n_neurons);
+    defer gpa.free(ext);
+    l.fillStimulus(.a, c.task_input_current, ext);
+
+    // Drive stimulus A so input->action synapses build eligibility, then reward.
+    for (0..40) |_| _ = s.step(ext);
+    s.applyReward(1.0);
+
+    // At least one plastic synapse must have consolidated above its 0.5 init.
+    var raised = false;
+    for (0..s.network.synapses.n) |k| {
+        if (s.network.synapses.plastic[k] and s.network.synapses.permanence[k] > 0.5) raised = true;
+        // Permanence stays a valid probability.
+        try testing.expect(s.network.synapses.permanence[k] >= 0.0 and s.network.synapses.permanence[k] <= 1.0);
+    }
+    try testing.expect(raised);
+}
+
+test "consolidation: off by default, reward leaves plastic permanence untouched" {
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+    // Same as above but consolidation OFF (and no structural plasticity needed).
+    const c = cfg.Config{
+        .master_seed = 1,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .consolidation_enabled = false,
+        .task_group_size = 8,
+        .background_current = 0.6,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = task.layout(c);
+    const ext = try gpa.alloc(f32, c.n_neurons);
+    defer gpa.free(ext);
+    l.fillStimulus(.a, c.task_input_current, ext);
+
+    for (0..40) |_| _ = s.step(ext);
+    s.applyReward(1.0);
+
+    // No permanence moved off the 0.5 init: consolidation is inert when disabled.
+    for (0..s.network.synapses.n) |k| {
+        if (s.network.synapses.plastic[k]) try testing.expectEqual(@as(f32, 0.5), s.network.synapses.permanence[k]);
+    }
+}
+
+test "consolidation: makes an unconsolidated plastic synapse prunable; a consolidated one survives" {
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 2,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .structural_plasticity_enabled = true,
+        .growth_probability = 0.0,
+        .consolidation_enabled = true,
+        .task_group_size = 8,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const syn = &s.network.synapses;
+
+    // Two plastic synapses: one consolidated (high q, kept), one tentative
+    // (low q, weak, aged -> should prune). Quiet endpoints so nothing re-grows q.
+    var kc: ?u32 = null;
+    var kt: ?u32 = null;
+    for (0..syn.n) |k| {
+        if (!syn.plastic[k] or !syn.alive[k]) continue;
+        if (kc == null) {
+            kc = @intCast(k);
+        } else {
+            kt = @intCast(k);
+            break;
+        }
+    }
+    const consolidated = kc.?;
+    const tentative = kt.?;
+
+    syn.permanence[consolidated] = 0.95;
+    syn.weight[consolidated] = 1.0;
+    syn.age[consolidated] = 100;
+
+    syn.permanence[tentative] = 0.05;
+    syn.weight[tentative] = 0.01;
+    syn.age[tentative] = c.min_synapse_age + 5;
+
+    @memset(s.network.neurons.rate_ema, 0); // quiet: no co-activity to rescue anything
+
+    _ = s.applyStructuralPlasticity();
+
+    try testing.expect(syn.alive[consolidated]); // high permanence protected it
+    try testing.expect(!syn.alive[tentative]); // unconsolidated + weak + aged -> pruned
+}
+
+test "consolidation: requires structural plasticity (validation)" {
+    var c = cfg.Config{ .consolidation_enabled = true, .structural_plasticity_enabled = false };
+    try testing.expectError(error.ConsolidationNeedsStructuralPlasticity, c.validate());
+    c.structural_plasticity_enabled = true;
+    try c.validate(); // now legal
+}
+
+test "learning: consolidated pathways survive disuse better than tentative ones (Phase 6 exit criterion)" {
+    // The exit criterion, as an assertion: after learning task A, the synapses
+    // whose permanence consolidated (previously useful) survive a block of disuse
+    // (present only B) far better than the tentative (never-consolidated) ones.
+    // Deterministic; the survival fractions are exact. Scaled down vs the harness.
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+
+    const seeds = [_]u64{ 1, 2 };
+    const block_a: u32 = 1200;
+    const block_b: u32 = 500;
+    const stim_steps: u32 = 40;
+    const readout_steps: u32 = 25;
+    const growth_interval: u32 = 50;
+    const consolidated_q: f32 = 0.6;
+    const tentative_q: f32 = 0.4;
+
+    var worst_gap: f64 = 1.0;
+
+    for (seeds) |seed| {
+        const c = cfg.Config{
+            .master_seed = seed,
+            .n_neurons = 100,
+            .task_enabled = true,
+            .plasticity_enabled = true,
+            .homeostasis_enabled = true,
+            .homeostasis_per_step = false,
+            .target_rate = 0.05,
+            .homeostasis_lr = 0.05,
+            .task_group_size = 8,
+            .structural_plasticity_enabled = true,
+            .growth_probability = 0.0,
+            .consolidation_enabled = true,
+            .consolidation_lr = 0.05,
+        };
+        var s = try Sim.init(gpa, c);
+        defer s.deinit(gpa);
+        const l = task.layout(c);
+        const ext = try gpa.alloc(f32, c.n_neurons);
+        defer gpa.free(ext);
+
+        const runEp = struct {
+            fn f(sim_s: *Sim, lay: task.Layout, e: []f32, sd: u64, ep: u32, force_b: bool) void {
+                sim_s.resetEpisode();
+                const cc = sim_s.network.config;
+                const choice: task.Choice = if (force_b) .b else blk: {
+                    var trng = rng.derived(sd, .task, ep);
+                    break :blk if (trng.below(2) == 0) .a else .b;
+                };
+                lay.fillStimulus(choice, cc.task_input_current, e);
+                var c0: u32 = 0;
+                var c1: u32 = 0;
+                for (0..stim_steps) |step| {
+                    _ = sim_s.step(e);
+                    if (step >= stim_steps - readout_steps) {
+                        const fired = sim_s.network.neurons.fired;
+                        for (lay.action_0.lo..lay.action_0.hi) |i| c0 += @intFromBool(fired[i]);
+                        for (lay.action_1.lo..lay.action_1.hi) |i| c1 += @intFromBool(fired[i]);
+                    }
+                }
+                var chosen: u1 = undefined;
+                if (c0 > c1) {
+                    chosen = 0;
+                } else if (c1 > c0) {
+                    chosen = 1;
+                } else {
+                    var arng = rng.derived(sd, .action, ep);
+                    chosen = @intCast(arng.below(2));
+                }
+                const correct = chosen == lay.correctAction(choice);
+                sim_s.applyReward(if (correct) 1.0 else -1.0);
+                sim_s.applyHomeostasis();
+            }
+        }.f;
+
+        // Block A: learn the full task.
+        for (0..block_a) |ep_usize| {
+            const ep: u32 = @intCast(ep_usize);
+            runEp(&s, l, ext, seed, ep, false);
+            if ((ep + 1) % growth_interval == 0) _ = s.applyStructuralPlasticity();
+        }
+
+        // Snapshot permanence bands (§8.3).
+        const syn = &s.network.synapses;
+        const bandc = try gpa.alloc(u8, syn.n);
+        defer gpa.free(bandc);
+        @memset(bandc, 0);
+        var n_cons: u32 = 0;
+        var n_tent: u32 = 0;
+        for (0..syn.n) |k| {
+            if (!syn.plastic[k] or !syn.alive[k]) continue;
+            if (syn.permanence[k] >= consolidated_q) {
+                bandc[k] = 1;
+                n_cons += 1;
+            } else if (syn.permanence[k] <= tentative_q) {
+                bandc[k] = 2;
+                n_tent += 1;
+            }
+        }
+        try testing.expect(n_cons > 0); // learning consolidated some useful pathways
+        try testing.expect(n_tent > 0); // and left some tentative ones
+
+        // Block B: present only B; the A pathway goes unused and decays/prunes.
+        for (0..block_b) |ep_usize| {
+            const ep: u32 = @intCast(block_a + ep_usize);
+            runEp(&s, l, ext, seed, ep, true);
+            if ((ep + 1) % growth_interval == 0) _ = s.applyStructuralPlasticity();
+        }
+
+        var cons_alive: u32 = 0;
+        var tent_alive: u32 = 0;
+        for (0..syn.n) |k| {
+            switch (bandc[k]) {
+                1 => cons_alive += @intFromBool(syn.alive[k]),
+                2 => tent_alive += @intFromBool(syn.alive[k]),
+                else => {},
+            }
+        }
+        const cons_surv = @as(f64, @floatFromInt(cons_alive)) / @as(f64, @floatFromInt(n_cons));
+        const tent_surv = @as(f64, @floatFromInt(tent_alive)) / @as(f64, @floatFromInt(n_tent));
+        worst_gap = @min(worst_gap, cons_surv - tent_surv);
+    }
+
+    // Consolidated pathways survive markedly better than tentative ones.
+    try testing.expect(worst_gap > 0.3);
 }

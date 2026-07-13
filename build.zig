@@ -216,6 +216,26 @@ pub fn build(b: *std.Build) void {
         grow_cmd.addArgs(args);
     }
 
+    // The Phase 6 consolidation experiment (continual-learning exit criterion).
+    // Invoked with `zig build continual`.
+    const continual_exe = b.addExecutable(.{
+        .name = "continual",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/continual.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(continual_exe);
+
+    const continual_step = b.step("continual", "Run the consolidation continual-learning experiment -> continual.csv");
+    const continual_cmd = b.addRunArtifact(continual_exe);
+    continual_step.dependOn(&continual_cmd.step);
+    continual_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        continual_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

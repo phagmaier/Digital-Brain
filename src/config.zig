@@ -244,10 +244,6 @@ pub const Config = struct {
     /// stays mildly active -- which is what keeps weak/grown synapses cycling out
     /// (real turnover) rather than every synapse pinning at permanence 1.
     coactivity_max: f32 = 1.5,
-    /// eta_q: reward-gated stabilization (§8.4's rewarded-eligibility term). Only
-    /// bites on synapses that carry eligibility (plastic ones); reservoir edges
-    /// have e=0 so it does nothing to them. 0 by default -- kept for completeness.
-    permanence_reward_lr: f32 = 0.0,
 
     /// Permanence-dependent weight decay (§8.5): w *= 1 - lambda_w*(1-q). High
     /// permanence -> ~no decay; low permanence -> fast decay toward prunable.
@@ -278,6 +274,30 @@ pub const Config = struct {
     /// many steps, so a free-running `zig build run -- configs/structural.json`
     /// visibly rewires. Keep it large -- growth is the slowest clock (§8.7).
     structural_interval_steps: u32 = 0,
+
+    // -- consolidation (Phase 6, DEC-012) ---------------------------------
+    // Separates the FAST weight timescale from the SLOW structure timescale so
+    // that repeatedly-rewarded pathways SURVIVE while unused tentative ones decay.
+    // OFF by default; requires structural_plasticity_enabled (it reuses that slow
+    // clock for permanence decay + pruning). Enable via configs/consolidation.json
+    // or the continual-learning harness (zig build continual).
+    //
+    // The bridge is reward-gated permanence on the PLASTIC readout synapses (the
+    // ones that carry eligibility, unlike the reservoir): when a plastic synapse
+    // is part of rewarded behaviour, applyReward nudges its permanence up (§8.4's
+    // eta_q*max(0, r*e) term). Consolidated (high-q) pathways then barely feel the
+    // permanence-dependent weight decay / pruning that erodes the rest. So:
+    //   reservoir edges  -- permanence driven by ACTIVITY (Phase 5, DEC-011).
+    //   plastic  edges   -- permanence driven by REWARD (this, DEC-012); §8.3's
+    //                       "consolidated == repeatedly associated with rewarded
+    //                       behaviour", NOT merely co-active.
+    // With this on, plastic synapses also join the slow disuse-decay + prune loops,
+    // so an unused, unconsolidated readout pathway forgets (decays and is pruned).
+    consolidation_enabled: bool = false,
+    /// eta_q: reward-gated permanence gain per rewarded episode on plastic
+    /// synapses. Small on purpose -- permanence is the SLOW variable; it should
+    /// take many rewarded episodes to consolidate, so noise doesn't stick.
+    consolidation_lr: f32 = 0.02,
 
     // -- run --------------------------------------------------------------
     steps: u32 = 2000,
@@ -346,6 +366,14 @@ pub const Config = struct {
             // consolidate -- defeating the point of growth.
             if (self.grow_permanence_init < self.prune_permanence_min)
                 return error.TentativeBornPrunable;
+        }
+
+        // Phase 6 consolidation reuses the slow structural clock (permanence decay
+        // + pruning), so it cannot run without it.
+        if (self.consolidation_enabled) {
+            if (!self.structural_plasticity_enabled)
+                return error.ConsolidationNeedsStructuralPlasticity;
+            if (self.consolidation_lr < 0.0) return error.BadConsolidationLr;
         }
     }
 
