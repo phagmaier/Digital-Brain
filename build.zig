@@ -136,6 +136,26 @@ pub fn build(b: *std.Build) void {
         sweep_cmd.addArgs(args);
     }
 
+    // The Phase 2 perturbation experiment (homeostasis exit criterion).
+    // Invoked with `zig build perturb`.
+    const perturb_exe = b.addExecutable(.{
+        .name = "perturb",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/perturb.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(perturb_exe);
+
+    const perturb_step = b.step("perturb", "Run the homeostasis perturbation experiment -> perturb.csv");
+    const perturb_cmd = b.addRunArtifact(perturb_exe);
+    perturb_step.dependOn(&perturb_cmd.step);
+    perturb_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        perturb_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

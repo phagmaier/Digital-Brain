@@ -62,9 +62,9 @@ pub const Logger = struct {
     /// Per-step metrics. The E/I current columns are the ones that tell you WHY
     /// the network died or exploded, rather than merely that it did.
     pub fn writeMetrics(self: Logger, w: *std.Io.Writer) !void {
-        try w.print("t,spikes,exc_spikes,inh_spikes,mean_u,exc_current,inh_current,scheduled_events\n", .{});
+        try w.print("t,spikes,exc_spikes,inh_spikes,mean_u,exc_current,inh_current,scheduled_events,mean_threshold,mean_rate_ema\n", .{});
         for (self.steps.items) |m| {
-            try w.print("{d},{d},{d},{d},{d:.5},{d:.5},{d:.5},{d}\n", .{
+            try w.print("{d},{d},{d},{d},{d:.5},{d:.5},{d:.5},{d},{d:.5},{d:.6}\n", .{
                 m.t,
                 m.spikes,
                 m.exc_spikes,
@@ -73,6 +73,8 @@ pub const Logger = struct {
                 m.exc_current,
                 m.inh_current,
                 m.scheduled_events,
+                m.mean_threshold,
+                m.mean_rate_ema,
             });
         }
     }

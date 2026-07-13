@@ -96,6 +96,14 @@ pub const StepMetrics = struct {
     exc_current: f32 = 0,
     inh_current: f32 = 0,
     scheduled_events: u32 = 0,
+    /// Population-mean adaptive threshold. Flat in Phase 1; when homeostasis is
+    /// on this is the trace that shows the controller working -- it rises to
+    /// suppress activity and relaxes when activity falls. Watching it next to
+    /// the firing rate is how you see regulation happen.
+    mean_threshold: f32 = 0,
+    /// Population-mean per-neuron firing-rate EMA (rho_i). The homeostat's
+    /// input signal; converges toward target_rate when regulation is working.
+    mean_rate_ema: f32 = 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -271,7 +279,44 @@ pub const Sim = struct {
         // 8-9. Traces and eligibility -- Phase 3. Deliberately absent.
         // 10.  Workspace competition -- Phase 7. Deliberately absent.
 
-        // 11. Homeostasis (Phase 2; off by default).
+        // 11. Homeostasis (Phase 2). In the continuous simulator this runs every
+        //     step. The Phase 3 episode driver instead sets homeostasis_per_step
+        //     = false and calls applyHomeostasis() once per episode -- the doc's
+        //     "Update homeostasis" step, at per-episode/window cadence.
+        if (c.homeostasis_per_step) self.applyHomeostasis();
+
+        // Observability: mean threshold and mean rate EMA, so the controller is
+        // visible in metrics.csv without post-hoc computation. Recorded after the
+        // per-step homeostatic update (if any), i.e. the post-update state.
+        var th_sum: f32 = 0;
+        var rho_sum: f32 = 0;
+        for (0..n) |i| {
+            th_sum += nrn.threshold[i];
+            rho_sum += nrn.rate_ema[i];
+        }
+        m.mean_threshold = th_sum / @as(f32, @floatFromInt(n));
+        m.mean_rate_ema = rho_sum / @as(f32, @floatFromInt(n));
+
+        self.t += 1;
+        return m;
+    }
+
+    /// Apply both homeostats once, each gated by its own enable flag. This is
+    /// the unit of "Update homeostasis": Sim.step calls it every step when
+    /// config.homeostasis_per_step is true; otherwise the caller (the Phase 3
+    /// episode driver) calls it explicitly at the end of each episode/window.
+    ///
+    /// Deterministic -- no RNG -- and traversed in stable order (neurons by
+    /// ascending id, synapses in CSR order), so it never touches the
+    /// reproducibility invariant. Reads the current rate EMA, which the step
+    /// loop has already updated this step.
+    pub fn applyHomeostasis(self: *Sim) void {
+        const c = self.network.config;
+        const nrn = &self.network.neurons;
+        const syn = &self.network.synapses;
+        const n = nrn.n;
+
+        // 11a. Adaptive thresholds. Negative feedback on each neuron's own rate.
         if (c.homeostasis_enabled) {
             for (0..n) |i| {
                 nrn.threshold[i] += c.homeostasis_lr * (nrn.rate_ema[i] - c.target_rate);
@@ -279,8 +324,17 @@ pub const Sim = struct {
             }
         }
 
-        self.t += 1;
-        return m;
+        // 11b. Synaptic scaling (DEC-007). Postsynaptic, excitatory-input only.
+        //      Uses the same rate EMA as the threshold homeostat.
+        if (c.weight_normalization_enabled) {
+            for (0..syn.n) |k| {
+                if (!syn.alive[k]) continue;
+                if (nrn.kind[syn.source[k]] != .excitatory) continue;
+                const j = syn.target[k];
+                const factor = 1.0 + c.weight_norm_lr * (c.target_rate - nrn.rate_ema[j]);
+                syn.weight[k] = std.math.clamp(syn.weight[k] * factor, 0.0, c.weight_max);
+            }
+        }
     }
 };
 
@@ -593,4 +647,158 @@ test "sim: hard reset and subtractive reset differ" {
     const soft = try meanRate(gpa, .subtractive);
     const hard = try meanRate(gpa, .hard);
     try testing.expect(soft != hard);
+}
+
+// ---- Phase 2: homeostasis (the completion checklist, as code) --------------
+
+test "homeostasis: adaptive thresholds pull an over-active network toward target" {
+    // Unregulated, this network sits near 0.14 spikes/neuron/step. Turn the
+    // threshold homeostat on with a low target and it must drive the rate down
+    // and the mean threshold up -- that is the controller doing its job.
+    const gpa = testing.allocator;
+    var s = try Sim.init(gpa, .{
+        .master_seed = 2026,
+        .homeostasis_enabled = true,
+        .target_rate = 0.03,
+        .homeostasis_lr = 0.05,
+    });
+    defer s.deinit(gpa);
+
+    var last = StepMetrics{};
+    for (0..6000) |_| last = s.step(null);
+
+    // Regulated down into the neighbourhood of target (from ~0.14).
+    try testing.expect(last.mean_rate_ema < 0.06);
+    try testing.expect(last.mean_rate_ema > 0.01);
+    // The controller moved: mean threshold rose well above the initial 1.0.
+    try testing.expect(last.mean_threshold > 1.5);
+}
+
+test "homeostasis: network returns to target band after a sustained perturbation (Phase 2 exit criterion)" {
+    // The exit criterion, as an assertion. Settle under homeostasis, then apply
+    // a SUSTAINED moderate drive to every neuron. With homeostasis the rate must
+    // return to the target band despite the drive; without it, the same drive
+    // leaves the rate pinned above the band. The contrast is the proof.
+    const gpa = testing.allocator;
+
+    const base = cfg.Config{
+        .master_seed = 0xB0A710,
+        .n_neurons = 100,
+        .target_rate = 0.05,
+        .homeostasis_lr = 0.05,
+    };
+
+    const ext = try gpa.alloc(f32, base.n_neurons);
+    defer gpa.free(ext);
+    @memset(ext, 0.40); // sustained moderate perturbation
+
+    const finalRate = struct {
+        fn f(alloc: Allocator, c0: cfg.Config, homeo: bool, e: []const f32) !f32 {
+            var c = c0;
+            c.homeostasis_enabled = homeo;
+            var s = try Sim.init(alloc, c);
+            defer s.deinit(alloc);
+            for (0..3000) |_| _ = s.step(null); // settle
+            var last: f32 = 0;
+            for (0..3000) |_| last = s.step(e).mean_rate_ema; // sustained perturb
+            return last;
+        }
+    }.f;
+
+    const band_lo = base.target_rate * 0.5;
+    const band_hi = base.target_rate * 1.6;
+
+    const on_final = try finalRate(gpa, base, true, ext);
+    const off_final = try finalRate(gpa, base, false, ext);
+
+    try testing.expect(on_final >= band_lo and on_final <= band_hi); // recovered
+    try testing.expect(off_final > band_hi); // control stays out -> homeostasis is what recovered it
+}
+
+test "homeostasis: synaptic scaling shrinks excitatory inputs to over-active neurons, leaves inhibition alone" {
+    // DEC-007. target_rate = 0 makes the direction unambiguous: every excitatory
+    // input to a firing neuron is scaled down, silent neurons' inputs are left
+    // as-is, so the excitatory total is non-increasing and strictly shrinks
+    // wherever there is activity. Inhibitory synapses must be untouched.
+    const gpa = testing.allocator;
+    var s = try Sim.init(gpa, .{
+        .master_seed = 3,
+        .weight_normalization_enabled = true,
+        .target_rate = 0.0,
+        .weight_norm_lr = 0.01,
+        .background_current = 1.0, // drive plenty of firing
+        .threshold = 0.5,
+    });
+    defer s.deinit(gpa);
+
+    const syn = &s.network.synapses;
+    const before = try gpa.dupe(f32, syn.weight);
+    defer gpa.free(before);
+
+    var exc_before: f64 = 0;
+    for (0..syn.n) |k| {
+        if (s.network.neurons.kind[syn.source[k]] == .excitatory) exc_before += before[k];
+    }
+
+    for (0..800) |_| _ = s.step(null);
+
+    var exc_after: f64 = 0;
+    for (0..syn.n) |k| {
+        try testing.expect(syn.weight[k] >= 0.0); // w >= 0 invariant survives scaling
+        if (s.network.neurons.kind[syn.source[k]] == .excitatory) {
+            exc_after += syn.weight[k];
+        } else {
+            try testing.expectEqual(before[k], syn.weight[k]); // inhibition untouched
+        }
+    }
+    try testing.expect(exc_after < exc_before);
+}
+
+test "homeostasis: per-episode seam -- step() leaves thresholds alone when per_step is false; applyHomeostasis() regulates" {
+    // The Phase 3 cadence: the episode driver runs steps with homeostasis_per_step
+    // = false, then calls applyHomeostasis() once at the "Update homeostasis" step.
+    // target_rate = 0 makes the direction unambiguous: any active neuron's
+    // threshold must rise when the update is applied.
+    const gpa = testing.allocator;
+    var s = try Sim.init(gpa, .{
+        .master_seed = 11,
+        .homeostasis_enabled = true,
+        .homeostasis_per_step = false, // caller controls cadence
+        .target_rate = 0.0,
+        .homeostasis_lr = 0.1,
+    });
+    defer s.deinit(gpa);
+
+    // Build up a nonzero rate EMA WITHOUT per-step regulation.
+    for (0..300) |_| _ = s.step(null);
+
+    // step() must not have touched thresholds: they are still the initial 1.0.
+    for (s.network.neurons.threshold) |th| try testing.expectEqual(@as(f32, 1.0), th);
+
+    // Now the driver applies homeostasis explicitly, once.
+    s.applyHomeostasis();
+
+    // Every neuron that fired (rate_ema > 0) must have had its threshold raised.
+    var any_raised = false;
+    for (s.network.neurons.threshold, s.network.neurons.rate_ema) |th, r| {
+        if (r > 0) {
+            try testing.expect(th > 1.0);
+            any_raised = true;
+        }
+    }
+    try testing.expect(any_raised); // sanity: the network actually fired
+}
+
+test "homeostasis: with both homeostats off, weights are unchanged across a run" {
+    // Guards the Phase 1 baseline: none of the Phase 2 machinery may touch
+    // weights unless explicitly enabled.
+    const gpa = testing.allocator;
+    var s = try Sim.init(gpa, .{ .master_seed = 8 });
+    defer s.deinit(gpa);
+
+    const before = try gpa.dupe(f32, s.network.synapses.weight);
+    defer gpa.free(before);
+
+    for (0..500) |_| _ = s.step(null);
+    try testing.expectEqualSlices(f32, before, s.network.synapses.weight);
 }

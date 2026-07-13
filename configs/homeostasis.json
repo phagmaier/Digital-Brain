@@ -1,0 +1,9 @@
+{
+  "master_seed": 12648430,
+  "n_neurons": 100,
+  "steps": 6000,
+  "homeostasis_enabled": true,
+  "weight_normalization_enabled": false,
+  "target_rate": 0.05,
+  "homeostasis_lr": 0.05
+}

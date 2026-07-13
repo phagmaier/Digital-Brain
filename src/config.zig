@@ -106,13 +106,47 @@ pub const Config = struct {
     /// the operating point. It is NOT beta.
     background_current: f32 = 0.35,
 
-    // -- homeostasis (Phase 2 -- present but off) --------------------------
+    // -- homeostasis (Phase 2) --------------------------------------------
+    // Two independent homeostats, each individually gated. Both are OFF by
+    // default so the Phase 1 baseline run is unchanged; turn them on via config
+    // (see configs/homeostasis.json) or the perturbation harness.
+    //
+    // 1. Adaptive thresholds (the primary homeostat). Each neuron nudges its own
+    //    threshold to drive its recent rate toward target_rate:
+    //      theta_i += eta_h * (rho_i - rho_target)
+    //    rho_i is the per-neuron firing-rate EMA. Negative feedback: fire too
+    //    much -> threshold rises -> fire less. This is the "recent firing-rate
+    //    estimate" + "adaptive thresholds" build items.
     homeostasis_enabled: bool = false,
-    rate_ema_decay: f32 = 0.99, // lambda_rho
+    rate_ema_decay: f32 = 0.99, // lambda_rho; time constant ~ 1/(1-lambda) steps
     target_rate: f32 = 0.02, // rho_target, spikes/neuron/step
     homeostasis_lr: f32 = 0.01, // eta_h
     threshold_min: f32 = 0.1,
-    threshold_max: f32 = 5.0,
+    /// Ceiling on the adaptive threshold. This is a stability rail, not a tuning
+    /// knob -- a threshold pinned here means the operating point is off (drive too
+    /// high for the target). 12 gives the homeostat enough authority to reject a
+    /// roughly doubled drive; keep it finite so runaway is still caught.
+    threshold_max: f32 = 12.0,
+    /// Cadence of the homeostatic update. TRUE (the continuous simulator)
+    /// applies both homeostats every step inside Sim.step. FALSE hands cadence
+    /// to the caller: the Phase 3 episode driver sets this false and calls
+    /// Sim.applyHomeostasis() once per episode -- the doc's "Update homeostasis"
+    /// step, per episode/window rather than per timestep.
+    homeostasis_per_step: bool = true,
+
+    // 2. Synaptic scaling (DEC-007, the "optional simple weight normalization").
+    //    Postsynaptic, excitatory-input only, multiplicative and slow. Each
+    //    EXCITATORY synapse is scaled by its TARGET neuron's rate error:
+    //      w_ij *= 1 + eta_w * (rho_target - rho_j)
+    //    A neuron firing above target scales its excitatory inputs down. This is
+    //    Turrigiano-style synaptic scaling, not Hebbian learning: it is global
+    //    and activity-driven, touches no eligibility trace, and leaves the
+    //    plastic[] flag alone (that belongs to Phase 3). Inhibitory synapses are
+    //    left untouched -- scaling them by the same rule would be the wrong sign.
+    weight_normalization_enabled: bool = false,
+    weight_norm_lr: f32 = 0.002, // eta_w
+    /// Upper clamp for scaled weights. w >= 0 still holds (sign is the neuron's).
+    weight_max: f32 = 8.0,
 
     // -- run --------------------------------------------------------------
     steps: u32 = 2000,
@@ -138,6 +172,16 @@ pub const Config = struct {
             return error.NegativeWeight;
         if (self.w_exc_init_hi < self.w_exc_init_lo or self.w_inh_init_hi < self.w_inh_init_lo)
             return error.BadWeightRange;
+
+        // Phase 2 homeostasis knobs.
+        if (self.rate_ema_decay < 0.0 or self.rate_ema_decay >= 1.0)
+            return error.BadRateEmaDecay;
+        if (self.target_rate < 0.0 or self.target_rate > 1.0)
+            return error.BadTargetRate;
+        if (self.threshold_max < self.threshold_min)
+            return error.BadThresholdRange;
+        if (self.weight_max < self.w_exc_init_hi)
+            return error.WeightMaxBelowInit;
     }
 
     /// Load a Config from a JSON file. Accepts EITHER a bare Config object or a
