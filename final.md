@@ -1,4 +1,4 @@
-# Final Assessment — Brain-Inspired Local Learning System
+# Honest Assessment — Brain-Inspired Local Learning System
 
 **Date:** 2026-07-13  
 **Sources:** project plan (`Brain Inspired Local Learning System.md`), `AGENTS.md`, `findings.md`, experiment CSVs, and the Zig implementation (~6.5k LOC under `src/`).
@@ -7,21 +7,17 @@
 
 ## 1. Executive verdict
 
-**This project achieved what it set out to do.** Phases 0–9 of the plan were implemented, each with mechanism tests and multi-seed behavioural harnesses, and every stated exit criterion was met under reproducible conditions.
+**You built something genuinely good and worth taking seriously.** It is far beyond a toy "I made some neurons spike" project. You designed a reproducible experimental platform, introduced mechanisms incrementally, built causal ablations, noticed when your own proposed tests were misleading, and extracted several non-obvious interaction effects.
 
-**Is it worth continuing?** Yes — but not as “add more mechanisms until it becomes a brain.” The platform is already a serious experimental apparatus. The high-value next work is *harder questions with cleaner controls*, not feature accretion.
+But the conclusion needs to be sharp:
 
-**Is there real promise?** Yes, of a specific kind. This is not a competitor to backprop on arithmetic benchmarks, and it does not show that unconstrained local rules spontaneously invent algorithms. It *does* show that a small set of biologically motivated mechanisms — sparse stochastic dynamics, homeostasis, three-factor eligibility, working-memory assemblies, structural permanence, reward-gated consolidation, and capacity-limited broadcast — can be composed into a system that:
+> **The project is scientifically interesting, but it has not yet demonstrated a novel general learning algorithm.**
 
-1. stays alive and sparse,
-2. learns from delayed scalar reward,
-3. retains information over long delays,
-4. rewires without destroying performance,
-5. protects useful pathways under disuse,
-6. gains causally from a workspace bottleneck, and
-7. composes unit transitions into held-out arithmetic better than pair memorization.
+Its strongest contribution is currently **a carefully engineered experimental synthesis of known ideas that produced several interesting system-level findings**. Its weakest point is that much of the actual task learning remains concentrated in the readout or in explicitly designed controllers rather than emerging through plasticity inside the recurrent network.
 
-Those are substantive scientific and engineering results for a project of this scale.
+That distinction does not diminish the project. It tells you exactly where the exciting next experiment lies.
+
+**Is it worth continuing?** Yes — but not as "add more mechanisms until it becomes a brain." The platform is already a serious experimental apparatus. The high-value next work is *harder questions with cleaner controls*, not feature accretion. The project already produced a **complete vertical slice** of the original plan — that is a success even as a closed chapter.
 
 ---
 
@@ -31,7 +27,11 @@ Those are substantive scientific and engineering results for a project of this s
 
 > **Can organized computation emerge from local reinforcement, stochastic exploration, and selective stabilization of connections?**
 
-The plan was unusually disciplined: one mechanism at a time, ablations, baselines, and explicit “negative results count.” Success was defined as a ladder of increasing capabilities (plan §23), not as beating gradient methods on arithmetic.
+The plan was unusually disciplined: one mechanism at a time, ablations, baselines, and explicit "negative results count." Success was defined as a ladder of increasing capabilities (plan §23), not as beating gradient methods on arithmetic.
+
+The answer the project actually supports is narrower than the original question:
+
+> Local rules can adapt and stabilize interfaces around a designed dynamical substrate, and interacting local mechanisms can produce useful memory behavior. But organized computation did not spontaneously *emerge* in the recurrent network — it was largely scaffolded at the readout and controller interface.
 
 ### 2.2 Delivery against the phase ladder
 
@@ -44,9 +44,9 @@ The plan was unusually disciplined: one mechanism at a time, ablations, baseline
 | 4 | Delayed association above chance | **Met** | Working memory @ delay 20: **0.996** vs reservoir-only **0.565** |
 | 5 | Connections change; activity stable; task survives | **Met** | Live edges ~790→~940; accuracy still 100% with rewiring |
 | 6 | Useful pathways survive disuse better | **Met** | Consolidated survival ~**0.97** vs tentative ~**0.00** |
-| 7 | Workspace causally helps a delayed/context task | **Met** | Mean **0.705** vs ablated **0.491** at delay 40 (+0.214) |
+| 7 | Workspace causally helps a delayed task | **Met** | Mean **0.705** vs ablated **0.491** at delay 40 (+0.214) |
 | 8 | Arithmetic beats memorization on a controlled split | **Met** | Held-out `a+b=4`: **1.000** vs pair-prior **0.111** (+0.889) |
-| 9 | Learned / evidence-based termination | **Met** | Stable unique answer ends episodes; timeout uses distinct −0.2 |
+| 9 | Evidence-triggered adaptive termination | **Met** | Stable unique answer ends episodes; timeout uses distinct −0.2 |
 
 ### 2.3 What the plan asked for that was *not* done
 
@@ -56,22 +56,21 @@ These gaps matter for honesty, not as failures of the completed ladder:
 |--------------|--------|---------|
 | Stage D — context-dependent mapping | **Not done** | Would stress multi-signal integration beyond two-choice |
 | Stage G — sequential multi-op arithmetic | **Not done** | Explicitly deferred; still the next hard curriculum step |
-| Conventional baselines (MLP / RNN / equal params) | **Not done** | Only internal ablations and a pair-lookup arithmetic baseline |
+| Conventional baselines (MLP / RNN / equal params) | **Not done** | Only internal ablations and a pair-lookup arithmetic baseline. This is the largest scientific gap. |
 | Full ablation matrix (plan §14 A–I, stochasticity splits) | **Partial** | Strong A/B harnesses exist; not every combinatorial ablation |
 | Noise / damage robustness batteries | **Not done** | Planned for generalization characterization |
-| Interactive network visualization | **Partial** | Raster + experiment plots; not the 2D spatial network view |
 | Reservoir *weight* learning | **Deliberately avoided** | DEC-008: plastic readout on fixed reservoir (reliability) |
 
-The unfinished items are mostly *extensions* and *comparisons*, not missing prerequisites for claiming the phase ladder.
+The unfinished items are mostly *extensions* and *comparisons*, not missing prerequisites for claiming the phase ladder — except for external baselines, which are now the most urgent gap.
 
-### 2.4 Engineering achievement (often under-rated)
+### 2.4 Engineering achievement
 
 The scientific claims rest on unusually strong engineering for an experimental sim:
 
 - **~6.5k lines of pure Zig**, no external runtime deps, Zig 0.16.
 - **Default-off mechanisms**: Phase 1 baseline stays byte-identical as features accumulate.
 - **Reproducibility as a hard constraint**: same seed → same spikes; structural evolution independent of firing-draw counts (DEC-004).
-- **Padded CSR** for grow/prune without breaking stable traversal (DEC-011) — the decision that made structural plasticity an addition, not a rewrite.
+- **Padded CSR** for grow/prune without breaking stable traversal (DEC-011) — the decision that made structural plasticity an addition, not a rewrite. Potentially novel as an engineering technique in this context.
 - **Experiment harnesses as first-class products**: `train`, `delay`, `grow`, `continual`, `workspace`, `arithmetic`, each with PASS/FAIL and CSV evidence.
 - **Tests encode invariants**, not just coverage; harness thresholds sit under deterministic observed results.
 
@@ -81,76 +80,82 @@ This is the difference between a notebook demo and a system you can still trust 
 
 ## 3. What the results actually showed
 
-### 3.1 Core scientific conclusions
+### 3.1 The most interesting findings
 
-#### A. Local three-factor learning works — when credit is short and the substrate is fixed
+#### A. Working memory emerged from an interaction, not from one mechanism
+
+This is probably the strongest conceptual finding.
+
+Self-excitation alone did not yield selective memory. In a fresh network, recurrent gain caused broad activation. Selective persistence appeared only once homeostasis placed individual neurons into an operating regime where stimulus + self-excitation crossed threshold but incidental reservoir feedback and the competing assembly did not.
+
+That means the memory was not simply "stored in a recurrent loop." It was produced by the interaction:
+
+\[
+\text{self-excitation}
+\times
+\text{homeostatic threshold adaptation}
+\times
+\text{network operating point}.
+\]
+
+That is exactly the sort of result that mechanism-oriented computational neuroscience should pursue. The individual ingredients are established, but their interaction in your system produced a nontrivial empirical result. Working memory here is a **system property, not a single knob** — and proving that required the deleted fresh-network probe, which is itself an honest methodological choice.
+
+#### B. Three forms of temporal retention were cleanly separated
+
+You distinguish:
+
+1. **Short fading memory** in the reservoir (echo-state, ~5–10 steps, ~chance by delay 20).
+2. **Longer persistence** in a self-exciting assembly (delay 20: 0.996 vs 0.565).
+3. **Capacity-limited retention** through a workspace (delay 40: 0.705 vs 0.491 ablation).
+
+That separation is valuable because many projects add several recurrent mechanisms and then merely report better accuracy. You instead showed approximately where the ordinary reservoir stopped carrying sufficient information and where the added mechanisms began earning their keep. The workspace result is especially useful because you removed the self-exciting mechanism and changed workspace with one flag — the causal interpretation is much cleaner than an end-to-end architecture comparison.
+
+#### C. Fast learning and slow consolidation wanted different reward signals
+
+This is a genuinely good design finding.
+
+For weight updates, the reward baseline `r − r̄` was critical — it prevented continuing drift once performance reached ceiling. But using that same baseline-subtracted signal for consolidation caused successful pathways to stop consolidating precisely when the system became consistently correct. The slow permanence process instead needed positive raw reward: `max(0, r·e)`.
+
+The broader concept of multiple timescales and reward-gated consolidation is not new. But this particular failure mode — rapid learners failing to consolidate because the reward prediction baseline eliminates the slow positive signal — is crisp, explainable, and potentially worth documenting formally.
+
+> **Lesson:** A signal appropriate for optimizing a fast variable is not necessarily appropriate for stabilizing a slow variable.
+
+#### D. Structural plasticity and homeostasis formed another meaningful coupling
+
+Random structural growth did not cause catastrophic disruption because homeostasis compensated for changing connectivity. Disuse pruning was naturally weak — homeostasis keeps nearly every neuron and connection active. This led to two useful conclusions:
+
+- Structural plasticity in this regime is **growth-dominated**, not high-churn.
+- A **target out-degree** is required for structural equilibrium rather than eventual saturation of all available slots.
+
+These principles exist in prior structural-plasticity literature. Your particular contribution is a strong implementation — the padded CSR engineering — and clean empirical demonstration that the coupling works.
+
+#### E. Learning was exploration-limited rather than learning-rate-limited
+
+The ~600-episode plateau followed by abrupt takeoff is interesting. Tripling the learning rate barely changed the escape point, supporting the hypothesis that the bottleneck is behavioral symmetry breaking or successful action exploration rather than update magnitude.
+
+This should be phrased as a **strong hypothesis supported by your intervention**, not fully proven. Other tests could distinguish it more cleanly: force balanced action exploration; credit only the selected action; introduce lateral inhibition; initialize a tiny controlled asymmetry; compare distributions of time-to-first-successful-streak. If those interventions collapse the plateau while learning-rate changes do not, the exploration explanation becomes much stronger.
+
+#### F. Local three-factor learning works — when credit is short and the substrate is fixed
 
 Immediate association is solved cleanly (8/8 seeds at ceiling) with pre × post × reward eligibility on **plastic readout synapses over a fixed reservoir**. That architecture choice (liquid-state / reservoir + trainable readout) is load-bearing: it makes credit assignment obvious and seed reliability high.
 
-**Implication:** “Local reinforcement can organize useful computation” is true here, but the *where* of plasticity matters as much as the rule. Training the full recurrent net was correctly treated as a harder, separate problem.
+**Implication:** The *where* of plasticity matters as much as the rule. Training the full recurrent net remains a harder, separate problem.
 
-#### B. Learning is exploration-limited, not rate-limited
+#### G. Arithmetic generalization here is transition composition, not emergent algorithm discovery
 
-~600-episode near-chance plateau, then sharp takeoff. Tripling learning rate barely moves takeoff and can slightly hurt final accuracy. The bottleneck is **breaking initial symmetry via stochastic exploration**, not gradient step size.
+Phase 8 binds left/right numerals separately, trains only `n±1` transitions, composes them for one operation, and freezes evaluation on held-out pairs that an exact-pair table cannot answer. Result: **1.000** held-out accuracy vs **1/9** pair-prior.
 
-**Implication:** If episodes-to-criterion matters later, invest in action competition / better credit (chosen-action only, lateral inhibition), not larger `η`.
+But the system already contains the algorithm: begin at left operand, apply successor or predecessor, repeat according to right operand. The system has learned or populated local transitions, but the composition procedure is externally supplied. Therefore the result demonstrates:
 
-#### C. Homeostasis is not optional infrastructure — it is a computational partner
+> A structured transition representation can compose learned unit mappings.
 
-- It recovers a target activity band after sustained drive.
-- Threshold rails have bounded authority; a pinned `threshold_max` means the *operating point* is wrong, not that the rail should keep rising.
-- Working-memory *specificity* (A stays on, B stays off) is **emergent from self-excitation + homeostasis trained into place** — not from recurrent gain alone. A fresh network with self-excitation saturates globally.
+It does **not** demonstrate that the brain-inspired system learned arithmetic composition from reward. The `findings.md` itself handles this honestly; the caveat should be prominent in any public account.
 
-**Implication:** “Working memory” here is a **system property**, not a single knob. That is one of the project’s best conceptual results.
+#### H. Phase 9 termination is evidence-triggered, not fully learned
 
-#### D. There are two memory timescales in the substrate, and they must not be conflated
+The stopping criterion is designed: a uniquely dominant answer must persist for a fixed stability window. Learning can make an answer become available sooner or more reliably, but the policy for recognizing commitment is hand-specified. A more accurate description is **evidence-triggered adaptive termination** rather than fully learned termination.
 
-| Mechanism | What it buys | Measured signature |
-|-----------|--------------|--------------------|
-| Reservoir fading memory (echo-state) | Short delays “for free” | Useful ~5–10 steps; ~chance by delay ~20 |
-| Self-exciting input assembly | Long-delay retention | Delay 20: **0.996** vs reservoir-only **0.565** |
-| Capacity-one workspace (no self-excitation) | Causal long-delay gain via bottleneck + broadcast | Delay 40: **0.705** vs **0.491** ablation |
-
-The delay curves *diverge where the reservoir runs out*. That is the cleanest controlled result in the project: memory mechanisms earn their keep specifically for **long** delays.
-
-#### E. Structural plasticity can rewire without destroying the task — if paired with homeostasis and budgets
-
-- Graph enriches (~20% more live reservoir edges, different topology).
-- Disuse pruning is **rare** in a homeostatic, task-active network — and that is correct: nearly every synapse is “used.”
-- Without a **target out-degree**, growth accretes to the hard slot cap; with it, structure can turn over around a set-point.
-- Exit criterion is a **three-way AND**: churn > 0, relative activity stability, task accuracy preserved.
-
-**Implication:** “Connections change” is not the same as “aggressive pruning.” The honest regime is **growth-dominated exploration with consolidation protecting what works**.
-
-#### F. Consolidation is real — and raw reward vs baseline is a critical distinction
-
-- Weight learning needs **baseline-subtracted** reward (zero-mean updates once solved).
-- Permanence consolidation needs **raw** reward (`η_q·max(0, r·e)`). Using the baseline kills consolidation exactly on the seeds that learn fastest (baseline → +1, modulator → 0).
-- Consolidated vs tentative survival after A→B disuse: **~0.97 vs ~0.00**.
-- Measuring survival by weight magnitude is misleading; small weights can still win readouts.
-
-**Implication:** Fast learning stability and slow structural memory want **opposite signals from the same reward**. That is a genuine design lesson, not a tuning anecdote.
-
-#### G. Workspace broadcast can be causal — with seed variance
-
-Removing self-excitation and enabling only a capacity-one workspace yields a multi-seed mean gain (+0.214) on a 40-step delay task. Ablated workspace state is exactly 0; enabled delay state sits ~0.94–0.99.
-
-Caveat: enabled seeds range **0.484–1.000**. The claim is a **mean causal benefit**, not universal seed perfection. That honesty in the criterion design is correct science.
-
-#### H. Arithmetic generalization here is transition composition, not spontaneous symbol invention
-
-Phase 8 deliberately:
-
-- binds left/right numerals separately,
-- trains only `n±1` transitions,
-- composes them for one operation,
-- freezes evaluation on held-out pairs that an exact-pair table cannot answer.
-
-Result: **1.000** held-out accuracy vs **1/9** pair-prior. Phase 9 adds answer-ID-neutral stable termination through the same reward path.
-
-**Critical interpretation:** this is a **structured controller coupled to spiking assemblies**, not evidence that the unconstrained reservoir invented arithmetic. The plan’s own caution about memorization is respected — and so should any future writeup’s language.
-
-### 3.2 Answers to the plan’s open questions (partial)
+### 3.2 Answers to the plan's open questions (partial)
 
 | Open question (plan §22) | Status after Phases 1–9 |
 |--------------------------|-------------------------|
@@ -164,50 +169,83 @@ Result: **1.000** held-out accuracy vs **1/9** pair-prior. Phase 9 adds answer-I
 | Full recurrent plasticity / no labeled outputs | **Out of scope so far** |
 | Length generalization (multi-op) | **Not attempted** |
 
-### 3.3 Against the plan’s success ladder (§23)
+---
 
-Levels 1–9 of the ladder are essentially achieved:
+## 4. How novel is it?
 
-1. Stable sparse activity  
-2. Immediate associations  
-3. Delayed association  
-4. (Stochasticity present and load-bearing for exploration; not fully ablated as an effect size)  
-5. Structural growth preserving utility  
-6. Consolidation reducing forgetting of useful pathways  
-7. Workspace-assisted delayed retention  
-8–9. One-op arithmetic above memorization + held-out structure + stable termination  
+### 4.1 The individual mechanisms are mostly not novel
 
-Level 10 — *interpretable emergent assemblies or pathways* — is only partially met. Working-memory assemblies and consolidated readout pathways are interpretable by construction and measurement; truly *discovered* subcircuits in the reservoir are not yet shown.
+The broad ingredients all have substantial precedents:
+
+- Reward-modulated STDP and three-factor rules;
+- Eligibility traces for delayed credit;
+- Liquid-state machines with fixed recurrent reservoirs and trained readouts;
+- Homeostatic intrinsic plasticity;
+- Structural growth and pruning;
+- Slow synaptic consolidation;
+- Stochastic neural and synaptic dynamics;
+- Recurrent persistent assemblies;
+- Bottlenecked broadcast.
+
+Your reliable Phase 3 architecture is recognizably a liquid-state machine: a fixed recurrent spiking "liquid" plus a trainable readout. Current reservoir-computing work explicitly describes fading memory as a central property and limitation of these systems.
+
+So you should not claim: "I discovered a new biologically plausible learning method." At least not yet.
+
+### 4.2 The combination may be unusual, but combination alone is not enough
+
+I did not find an obvious exact match for your full stack: stochastic spiking reservoir + homeostatic thresholds + local rewarded readout + assembly persistence + permanence-based structural plasticity + reward consolidation + capacity-one workspace + symbolic transition composition. That exact arrangement may well be uncommon.
+
+But almost every sufficiently detailed experimental architecture has a unique combination. Scientific novelty requires more than having a combination nobody happened to implement identically. A stronger novelty claim would be one of these:
+
+1. **A previously undocumented interaction:** mechanism A systematically changes mechanism B in a way that matters across tasks and parameter ranges.
+2. **A new algorithmic rule:** your update or architecture solves a recognized limitation better than relevant alternatives.
+3. **A new empirical capability:** your system succeeds on an evaluation where closely matched established systems fail.
+4. **A new explanatory result:** you identify necessary and sufficient ingredients for a phenomenon through controlled ablations.
+5. **A reusable methodological contribution:** your deterministic experimental framework makes structural SNN experiments substantially easier or more reliable.
+
+You may already have early versions of #1 (WM × homeostasis interaction, raw-vs-baseline reward finding) and #5 (padded CSR, derived RNG streams, deterministic harness architecture). You do not yet have convincing evidence for #2 or #3.
+
+### 4.3 Novelty estimate
+
+| Aspect | Assessment |
+|--------|------------|
+| Spiking, local reward, eligibility | Established |
+| Fixed reservoir plus plastic readout | Established |
+| Homeostatic selective persistence | Interesting interaction; likely related precedents, but your result is worth probing |
+| Raw reward for consolidation versus centered reward for learning | Very good design finding; potentially publishable as part of a broader study |
+| Rewiring under homeostatic control | Established direction; strong implementation |
+| Padded deterministic CSR rewiring | Potentially novel engineering technique in this context |
+| Capacity-one workspace experiment | Interesting integration; not yet a new workspace algorithm |
+| Arithmetic result | Valid software result, but heavily scaffolded and not evidence of emergent arithmetic |
+| Entire platform | Unusually coherent and rigorous for an independent project |
+
+Relative to the research literature: **moderate originality of integration and experimentation; low novelty of the constituent algorithms; unresolved novelty of the observed interactions.**
 
 ---
 
-## 4. What is interesting / where the promise is
+## 5. What is interesting / where the promise is
 
-### 4.1 Strong promise (keep, deepen)
+### 5.1 Strong promise
 
 1. **Mechanism interaction science.** The best results are not single knobs — they are *couplings*:
-   - self-excitation × homeostasis → selective persistence  
-   - rewiring × homeostasis → stable structural exploration  
-   - baseline for weights × raw reward for permanence → two timescales of memory  
-   - eligibility × terminal reward × timeout scalar → one learning path for answer and stop  
+   - self-excitation × homeostasis → selective persistence
+   - rewiring × homeostasis → stable structural exploration
+   - baseline for weights × raw reward for permanence → two timescales of memory
+   - eligibility × terminal reward × timeout scalar → one learning path
 
-2. **A reproducible “local learning lab.”** Few hobby/research toys can claim: deterministic multi-seed ablations, default-off composition, and byte-identical replays across structural rewiring. That is a platform advantage.
+2. **A reproducible "local learning lab."** Deterministic multi-seed ablations, default-off composition, and byte-identical replays across structural rewiring. That is a platform advantage over typical notebook demos.
 
-3. **Honest intermediate claims.** The project repeatedly refused fake mechanism tests (e.g. deleted the fresh-network WM specificity probe when it failed for a real reason). That culture is why the findings are trustworthy.
+3. **Honest intermediate claims.** The project repeatedly refused fake mechanism tests (deleted the fresh-network WM specificity probe when it failed for a real reason). That culture is why the findings are trustworthy.
 
 4. **Continual learning as structure, not just weight regularization.** Permanence bands + pruning give a discrete, measurable survival story that weight L2 cannot.
 
-5. **Composition as a curriculum principle.** Training unit transitions and evaluating held-out pairs is the right kind of generalization claim for a small system.
+### 5.2 Moderate promise (conditional)
 
-### 4.2 Moderate promise (conditional)
+1. **Workspace as algorithmic primitive.** Capacity-one bottleneck helps long delay; multi-item interference, learned admission, and context tasks remain open.
+2. **Structural search for reusable subcircuits.** Topology changes while the task holds — but no demonstration yet that grown edges form *task-specific reusable motifs* rather than mild enrichment.
+3. **Neuromorphic / online / damage-robust niches.** The sparse local-update design is well-aligned with these evaluation axes but untested.
 
-1. **Workspace as algorithmic primitive.** Capacity-one bottleneck helps long delay; multi-item interference, learned admission, and context tasks remain open. Interesting *if* the next experiments stay one-flag causal.
-
-2. **Structural search for reusable subcircuits.** Topology changes while the task holds — but there is not yet a demonstration that grown edges form *task-specific reusable motifs* rather than mild enrichment.
-
-3. **Neuromorphic / online / damage-robust niches.** The plan correctly notes these may matter more than raw accuracy. Untested, but the sparse local-update design is well-aligned with those evaluation axes.
-
-### 4.3 Weak / not yet promised
+### 5.3 Weak / not yet promised
 
 1. **Competing with backprop on arithmetic or language.** Not the goal; not close; wrong comparison.
 2. **Emergent algorithm discovery in the reservoir.** Learning still lives mostly at the readout / controller interface.
@@ -215,146 +253,88 @@ Level 10 — *interpretable emergent assemblies or pathways* — is only partial
 
 ---
 
-## 5. Honest limitations (do not paper over these)
+## 6. Honest limitations
 
-1. **Plasticity is mostly at the interface.** Reservoir weights are fixed; grown reservoir edges are non-plastic. “Local learning system” is accurate for the *rule class*, but the recurrent substrate is largely a fixed dynamical feature map plus structural turnover.
+1. **Plasticity is mostly at the interface.** Reservoir weights are fixed; grown reservoir edges are non-plastic. The recurrent substrate is largely a fixed dynamical feature map plus structural turnover.
 
-2. **Arithmetic is scaffolded.** Position-bound encodings, teaching currents during training, and an explicit transition controller do real work. That is good engineering and good curriculum design — it is not pure emergence.
+2. **Arithmetic is scaffolded.** Position-bound encodings, teaching currents during training, and an explicit transition controller do real work. It is good engineering and good curriculum design — it is not pure emergence.
 
-3. **Tasks are small.** Two-choice, small numeral ranges, one operator, fixed or lightly variable episode structure. Ceiling effects (many 100% accuracies) mean future work needs harder tasks or harder splits to keep learning something.
+3. **Tasks are small.** Two-choice, small numeral ranges, one operator, fixed or lightly variable episode structure. Ceiling effects (many 100% accuracies) mean future work needs harder tasks or harder splits.
 
-4. **External baselines missing.** Without MLP/RNN/equal-parameter comparisons, claims about sample efficiency, robustness, or “interesting niches” remain qualitative.
+4. **External baselines missing.** Without MLP/RNN/equal-parameter comparisons, claims about sample efficiency, robustness, or "interesting niches" remain qualitative. This is the largest scientific gap. A backprop-trained RNN will probably win on raw sample efficiency and accuracy — the interesting question is whether your system occupies a different Pareto point on forgetting, sparsity, online adaptation, or lesion resistance.
 
-5. **Workspace variance.** Mean causal benefit coexists with seeds near chance. That is scientifically fine; it is also a reliability gap if workspace is to become a default substrate.
+5. **Workspace variance.** Mean causal benefit coexists with seeds near chance. Scientifically fine; a reliability gap if workspace becomes a default substrate.
 
-6. **Scale.** 100 neurons, fixed max out-degree, hand-tuned curricula. Scaling laws, larger reservoirs, and automatic curricula are unknown.
+6. **Scale.** 100 neurons, fixed max out-degree, hand-tuned curricula. Scaling laws are unknown.
 
-7. **Open threads already noted in findings** remain valid: better credit assignment; true attractor WM; reservoir eligibility; activity-biased growth for visible turnover; multi-item workspace; stronger arithmetic ablations.
-
----
-
-## 6. Is this worth continuing?
-
-### Yes — under a clear charter
-
-**Continue if the goal is:**
-
-- a research sandbox for local, delayed, structural learning;
-- mechanism science (what is necessary, what couples, what fails);
-- eventually niche strengths (continual learning, sparsity, damage, online adaptation);
-- or a path toward more ambitious recurrent local learning with the same experimental standards.
-
-**Stop or freeze if the goal is:**
-
-- state-of-the-art accuracy on symbolic or perceptual benchmarks;
-- a product ML stack;
-- or “prove brains work this way.”
-
-The project already produced a **complete vertical slice** of the original plan. That is a success even as a closed chapter. Continuing is justified because the *next* questions are now well-posed and the infrastructure can answer them cheaply.
-
-### Recommended stance
-
-Treat Phases 1–9 as **v1 complete**. Do not invent Phase 10 as “more mechanisms.” Open **research tracks** with pass/fail questions, each with ablations from day one.
+7. **Stochasticity not fully characterized.** Firing stochasticity vs release stochasticity was not cleanly ablated — they may be redundant, or may serve different roles (exploration vs regularization).
 
 ---
 
-## 7. Highest-value improvements (near term)
+## 7. The single most important next experiment
 
-These improve scientific return on the existing system without a redesign.
+Do **not** add another brain-inspired feature.
 
-### 7.1 Science quality
+Instead, answer this:
 
-1. **External baselines for the two-choice and arithmetic curricula**  
-   Small RNN / echo-state + linear readout / tiny MLP on the same episode budget and seed set. Report equal-parameter and equal-example variants. Even if the local system loses on accuracy, document sparsity, forgetting, and online update cost.
+> **Can plasticity inside the recurrent reservoir become necessary for a task that the fixed-reservoir/readout system cannot solve?**
 
-2. **Stochasticity ablation matrix**  
-   Deterministic fire / stochastic fire × deterministic release / stochastic release, on train and delay. Answers plan §22 directly.
+The natural next version is not "more brain modules." It is a controlled recurrent-credit-assignment experiment.
 
-3. **Credit-assignment upgrades for speed, not accuracy**  
-   Lateral inhibition / WTA between action groups; credit only the chosen action. Measure episodes-to-90% across seeds. Findings already predict this is the right lever.
+### Proposed experiment
 
-4. **Harder evaluation before harder models**  
-   - Context-dependent mapping (Stage D)  
-   - Held-out *operators* and *results*, not only combinations  
-   - Multi-op sequential arithmetic with frozen unit transitions  
-   - Noise / drop spikes / synapse deletion robustness  
+Use a **context-dependent delayed mapping**:
 
-5. **Reservoir interpretability probes**  
-   After training, freeze and measure: which assemblies carry the stimulus during delay; whether grown edges concentrate near input/action groups; whether consolidated plastic edges form sparse pathways that explain readout winners.
+```
+context X, cue A → action 1
+context X, cue B → action 2
+context Y, cue A → action 2
+context Y, cue B → action 1
+```
 
-### 7.2 Mechanism fixes / extensions that findings already justify
+Present context and cue at separate times, with a delay before the answer. Design it so that a direct cue→action readout cannot solve the task without access to a context-dependent recurrent state.
 
-6. **Bistable / attractor working memory** if delays need to be unbounded — current WM is a *decaying* persistent state (~0.66 → ~0.15 over 40 steps).
+Compare:
 
-7. **Activity- or error-biased growth (+ quiet-baseline co-activity)** if studying forgetting/turnover; pure local random + homeostatic rates yields quiet pruning.
+1. Fixed reservoir + plastic readout (current architecture)
+2. Structural reservoir changes only
+3. Plastic recurrent edges using the local three-factor rule
+4. Recurrent plasticity with reward consolidation
+5. Same models with context removed or temporal order shuffled
 
-8. **Reservoir edges eligible for reward-gated permanence** (optional flag, default off) — the natural next credit-assignment experiment after DEC-012, with severe ablations so reservoir plasticity cannot silently ruin determinism or stability.
+The success criterion should not merely be that recurrent plasticity performs above chance. It should be:
 
-9. **Workspace v2 only after one-flag discipline:** multi-item capacity, interference tasks, learned admission — each as a separate harness.
+- The readout-only system reliably fails or reaches a substantially lower ceiling
+- Recurrent plasticity succeeds across many seeds
+- Freezing or ablating the learned recurrent changes destroys the advantage
+- Representational probes show the reservoir carries separable context-dependent states
+- The result survives matched parameter counts and training budgets
 
-### 7.3 Engineering polish
-
-10. **Plot scripts for workspace + arithmetic**; unify harness summary JSON (mean, gap, pass/fail, seed list).  
-11. **Config presets** already in `configs/` — add “paper figure” configs that reproduce each findings number with one command.  
-12. **Parametric scale tests** (N=100/200/400) on delay and continual only — check whether results are fragile to size.  
-13. **Remove / quarantine temp probes** (`probe_tmp.zig` etc.) so the public surface matches AGENTS.md.
+That would move the project from "a strong synthesis of established mechanisms" toward "evidence that this particular local recurrent learning scheme creates a capability unavailable to the standard fixed-reservoir architecture." That is the threshold where the work becomes much more potentially novel.
 
 ---
 
-## 8. Extension roadmap (if continuing)
+## 8. Other high-value research tracks
 
-Prioritized by insight-per-effort and fidelity to the original hypothesis.
+### Track A: Characterize what stochasticity is doing
 
-### Track A — Credit assignment (highest scientific leverage)
+Run a factorial: deterministic/stochastic firing × deterministic/stochastic release. Measure success rate across 20–50 seeds, median episodes-to-90%, variance in takeoff time, and robustness after learning. Then add forced exploration or winner-take-all action competition. This will tell you whether stochasticity is essential exploration, merely injecting delay, serving regularization, or redundant between neuron and synapse levels.
 
-**Question:** How far can imperfect local credit go once the reservoir is allowed to change functionally, not just topologically?
+### Track B: Map the working-memory phase diagram
 
-- Optional plastic recurrent edges with very slow rates and strong homeostasis.  
-- e-prop-like or random-feedback variants as *comparisons*, not rewrites.  
-- Tasks: delayed association, context-dependent mapping, continual A/B.
+Vary self-excitation strength, homeostasis rate, target firing rate, inhibitory strength, refractory duration, recurrent delay, stimulus duration, and network size. Map regions: no persistence, selective decaying persistence, nonselective saturation, oscillatory persistence, stable attractor, chaotic/unstable. The exciting result would be showing that homeostasis reliably moves initially unstable assemblies into a narrow selective-memory regime.
 
-**Success:** multi-seed above chance with recurrent plasticity *and* an ablation showing the plastic recurrent edges are necessary for a harder task the readout-only system fails.
+### Track C: Determine whether structural growth learns anything task-specific
 
-### Track B — Compositional curricula (highest narrative leverage)
+Test local distance-biased, global random, co-activity-biased, and reward/error-biased growth with matched final degree distributions. Measure whether grown edges preferentially connect task-relevant assemblies, reduce learning time on a second related task, survive consolidation, improve transfer, or become causally necessary when lesioned. The decisive experiment is **transfer**, not mere rewiring.
 
-**Question:** Can transition composition scale past one operation without becoming a hand-built CPU?
+### Track D: Stress the workspace rather than enlarging it
 
-- Multi-op sequences; intermediate state must survive workspace or WM.  
-- Ablate teaching current and transition controller separately (findings already warn this is required for stronger claims).  
-- Magnitude encodings if number-range generalization is attempted.
+Test dual delayed cues, distractors, cue replacement, order-sensitive recall, conflicting candidates, and capacity 1 vs 2 vs 4. A non-monotonic capacity result — too little loses information, too much produces interference — would be substantially more interesting than simply increasing average accuracy.
 
-**Success:** held-out length or operator generalization above memorization and above a frozen pair table; controller ablation drops performance.
+### Track E: External baselines
 
-### Track C — Structure that means something (highest originality leverage)
-
-**Question:** Does local random search discover reusable subcircuits, or only denser noise?
-
-- Quantify motif statistics, input-assembly affinity, pathway reuse across tasks.  
-- Compare local spatial growth vs global random growth (plan §14).  
-- Continual learning where *structure* must transfer, not only readout permanence.
-
-**Success:** grown connectivity predicts transfer; global-random growth underperforms local growth on a transfer task with matched degree budgets.
-
-### Track D — Limited global broadcast under load
-
-**Question:** When does capacity-one help vs hurt?
-
-- Dual delayed cues, order-sensitive tasks, interrupt / rewrite trials.  
-- Measure interference curves vs capacity.  
-- Keep causal on/off ablation sacred.
-
-**Success:** non-monotonic capacity curve or a task family where capacity-one is necessary for sequential control.
-
-### Track E — Niche evaluation (application story)
-
-**Question:** Where, if anywhere, do local sparse systems win?
-
-- Online learning under nonstationarity  
-- Synapse/neuron lesion robustness  
-- Energy proxy: spikes × active synapses per correct answer  
-- Catastrophic forgetting vs small replay-free backprop nets  
-
-**Success:** a clear Pareto win on robustness/forgetting/energy even if accuracy is worse.
+For each important task, compare against a conventional echo-state machine with linear readout, a tiny RNN trained by BPTT, and a simple tabular or finite-state baseline. Evaluate not just final accuracy but online adaptation, catastrophic forgetting, lesion resistance, sparse activity, local update cost, and adaptation under distribution shift. Your plausible advantages are in these niches, not in raw sample efficiency.
 
 ---
 
@@ -362,22 +342,20 @@ Prioritized by insight-per-effort and fidelity to the original hypothesis.
 
 It is **not**:
 
-- a brain simulation,
-- a general learning algorithm ready for large-scale ML,
-- or proof that local rules alone invent arithmetic.
+- a brain simulation;
+- a new brain learning algorithm;
+- a general learning algorithm ready for large-scale ML;
+- emergent arithmetic;
+- general intelligence;
+- or proof that local rules alone invent computation.
 
 It **is**:
 
 - a complete, reproducible implementation of a carefully chosen stack of brain-*inspired* mechanisms;
-- a sequence of causal experiments that largely validate the plan’s mechanism ladder;
-- a body of non-obvious empirical lessons (exploration-limited learning; WM as system property; raw vs baseline reward; growth-dominated structural regimes; scaffolded composition);
-- and a foundation that can support either a published experimental narrative or a second research phase with harder questions.
-
-The central hypothesis receives a **qualified yes**:
-
-> Organized computation *can* emerge from local reinforcement, stochastic exploration, and selective stabilization — **when** the system is given stable dynamics (homeostasis), a usable memory substrate (assemblies / workspace), short credit paths (readout plasticity), and, for symbolic composition, structured curricula. Without those supports, the same rules do not magically invent the solution.
-
-That qualified yes is more valuable than a vague absolute yes. It tells you *which* ingredients earn their keep.
+- a sequence of causal experiments that largely validate the plan's mechanism ladder;
+- a body of non-obvious empirical lessons: working memory as a system property (homeostasis × self-excitation interaction); raw reward vs baseline-subtracted reward for consolidation; exploration-limited learning; growth-dominated structural regimes; scaffolded composition;
+- a foundation that supports either a published experimental narrative or a second research phase with harder questions;
+- and an unusually coherent and rigorous platform for an independent project.
 
 ---
 
@@ -388,12 +366,16 @@ That qualified yes is more valuable than a vague absolute yes. It tells you *whi
 | Plan completion | **Excellent** — Phases 0–9 exit criteria met |
 | Scientific honesty | **Excellent** — ablations, deleted false probes, scaffolded claims labeled |
 | Engineering quality | **Excellent** — determinism, modularity, harnesses |
-| Novelty | **Moderate–high** for a small personal research system; mechanism *couplings* are the story |
+| Mechanism novelty | **Low** — individual mechanisms are established |
+| Interaction novelty | **Moderate** — WM × homeostasis, raw-vs-baseline reward are genuine findings |
+| Platform novelty | **Moderate** — padded CSR, deterministic replay architecture may be novel engineering |
 | Immediate ML competitiveness | **Low** (and not the point) |
 | Promise if continued carefully | **High** for mechanism science; **moderate** for niche continual/robust/online strengths |
 | Worth continuing? | **Yes** — as focused research tracks, not feature stacking |
 
-**Recommendation:** freeze v1 as a success; write the scientific story around the delayed-memory dissociation, consolidation’s raw-reward requirement, structural rewiring under homeostasis, workspace causality, and compositional arithmetic under controlled splits; then open only one or two tracks (credit assignment *or* compositional curriculum *or* structural meaning) with the same phase discipline that made this work.
+---
+
+**Recommendation:** freeze v1 as a success. Write the scientific story around the delayed-memory dissociation, consolidation's raw-reward requirement, structural rewiring under homeostasis, workspace causality, and compositional arithmetic under controlled splits. Then open exactly one track — recurrent plasticity on a context-dependent task — with the same phase discipline that made this work.
 
 > **Build one mechanism, prove that it behaves correctly, measure its effect, and only then add the next mechanism.**  
 > That mantra already paid off. Keep it.

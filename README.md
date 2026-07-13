@@ -6,10 +6,12 @@ local, reward-modulated learning — no backpropagation. Built in pure Zig.
 **Central question: Can organized computation emerge from local reinforcement,
 stochastic exploration, and selective stabilization of connections?**
 
-The answer is a qualified yes — within a system that provides stable dynamics,
-usable memory substrates, short credit paths, and structured curricula. This
-project explores *which* ingredients earn their keep, one carefully-controlled
-mechanism at a time.
+The answer so far: local rules can adapt and stabilize interfaces around a
+designed dynamical substrate, and interacting local mechanisms can produce
+useful memory behavior. But organized computation did not spontaneously emerge
+in the recurrent network — it was largely scaffolded at the readout and
+controller interface. This project explores *which* ingredients earn their
+keep, one carefully-controlled mechanism at a time.
 
 ---
 
@@ -23,7 +25,9 @@ mechanism at a time.
 
 **It is not:**
 - A brain simulation or claim about biological fidelity
-- A general learning algorithm that competes with backpropagation on benchmarks
+- A novel general learning algorithm (the constituent mechanisms are established;
+  the interaction findings are the contribution)
+- A system that competes with backpropagation on benchmarks
 - Proof that local rules spontaneously invent arithmetic
 
 ---
@@ -44,7 +48,7 @@ the Phase 1 baseline remains byte-identical across the entire stack.
 | 6 | Consolidation (reward-gated permanence on readout) | Useful pathways survive disuse | ✅ |
 | 7 | Workspace broadcast (capacity-limited competition) | Causal long-delay accuracy gain over ablation | ✅ |
 | 8 | Arithmetic curriculum (transition composition) | Held-out `a+b=4` beats pair-lookup baseline | ✅ |
-| 9 | Learned termination (stable-answer evidence) | Unique dominant answer ends episodes via reward | ✅ |
+| 9 | Evidence-triggered termination | Stable unique answer ends episodes; timeout uses distinct penalty | ✅ |
 
 ---
 
@@ -159,27 +163,38 @@ The numbered design decisions (DEC-001 through DEC-013) are documented in
 
 ## Key empirical results
 
-- **Learning is exploration-limited, not rate-limited.** The bottleneck is
-  breaking initial symmetry via stochastic exploration — tripling the learning
-  rate barely moves the takeoff point.
+- **Working memory emerged from an interaction, not a mechanism.**
+  Stimulus-specific persistence required self-excitation × homeostasis × network
+  operating point — not recurrent gain alone. A fresh network with self-excitation
+  saturates globally; selectivity only appears after homeostatic tuning. This is
+  probably the strongest conceptual finding.
 
-- **Working memory is a system property, not a single knob.** Stimulus-specific
-  persistence emerges from self-excitation × homeostasis × learning. A fresh
-  network with self-excitation saturates globally.
+- **Fast learning and slow consolidation want different reward signals.**
+  Weight updates need baseline-subtracted reward to prevent drift. But
+  permanence consolidation needs *raw* reward — using the baseline kills
+  consolidation on the seeds that learn fastest. A signal appropriate for
+  optimizing a fast variable is not necessarily appropriate for stabilizing a
+  slow variable.
 
-- **Consolidation needs raw reward, not baseline-subtracted reward.** The same
-  reward baseline that keeps weight learning stable *poisons* consolidation.
-  Fast learning stability and slow structural memory want opposite signals.
+- **Three forms of temporal retention were cleanly separated.** Reservoir
+  fading memory (~5–10 steps), self-exciting assembly persistence (0.996 at
+  delay 20), and capacity-one workspace broadcast (0.705 vs 0.491 ablation at
+  delay 40) form distinct delay regimes with a one-flag causal ablation.
 
-- **Structural plasticity pairs with homeostasis.** Rewiring while staying
-  stable is the exit criterion; either mechanism alone fails.
+- **Learning is exploration-limited, not rate-limited.** A ~600-episode plateau
+  then sharp takeoff; tripling the learning rate barely moves it. The bottleneck
+  appears to be breaking initial symmetry via stochastic exploration.
 
-- **A capacity-one workspace provides a causal long-delay benefit.** Mean
-  accuracy +0.214 over an otherwise-identical ablation at delay 40.
+- **Structural plasticity pairs with homeostasis.** Rewiring grows from ~790
+  to ~940 live edges without destroying task performance or activity stability.
+  The regime is growth-dominated — disuse pruning is naturally weak when
+  homeostasis keeps most neurons active.
 
-- **Transition composition generalizes beyond memorization.** Held-out
-  `a+b=4` accuracy 1.000 vs pair-lookup prior 0.111, without storing operand
-  pairs.
+- **Transition composition generalizes beyond memorization, but the composition
+  procedure is scaffolded.** Held-out `a+b=4` accuracy 1.000 vs pair-lookup
+  prior 0.111. However: the system already contains the algorithm (begin at
+  left operand, apply successor/predecessor, repeat); the learned part is the
+  unit transitions, not the composition procedure itself.
 
 For detailed findings see [findings.md](findings.md). For a full assessment see
 [final.md](final.md). The original specification is in
