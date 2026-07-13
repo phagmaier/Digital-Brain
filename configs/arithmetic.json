@@ -1,0 +1,12 @@
+{
+  "n_neurons": 160,
+  "connection_density": 0.04,
+  "arithmetic_enabled": true,
+  "arithmetic_group_size": 5,
+  "arithmetic_max_operand": 4,
+  "plasticity_enabled": true,
+  "homeostasis_enabled": false,
+  "homeostasis_per_step": false,
+  "adaptation_enabled": false,
+  "background_current": 0.30
+}

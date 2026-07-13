@@ -256,6 +256,26 @@ pub fn build(b: *std.Build) void {
         workspace_cmd.addArgs(args);
     }
 
+    // The Phase 8 arithmetic curriculum and held-out-combination experiment.
+    // Invoked with `zig build arithmetic -Doptimize=ReleaseFast`.
+    const arithmetic_exe = b.addExecutable(.{
+        .name = "arithmetic",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/arithmetic_curriculum.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(arithmetic_exe);
+
+    const arithmetic_step = b.step("arithmetic", "Run the Phase 8 arithmetic curriculum -> arithmetic.csv");
+    const arithmetic_cmd = b.addRunArtifact(arithmetic_exe);
+    arithmetic_step.dependOn(&arithmetic_cmd.step);
+    arithmetic_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        arithmetic_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

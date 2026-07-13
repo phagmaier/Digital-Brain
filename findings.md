@@ -1,4 +1,4 @@
-# Findings — Phases 0–4
+# Findings — Phases 1–8
 
 Observations worth remembering from building the brain-inspired local-learning
 system. Not a spec (see the Obsidian note for that) and not a changelog (see git
@@ -211,20 +211,91 @@ differ solely in whether reward consolidates permanence — so the A-retest gap
 (on 1.00 vs off 0.86) is attributable to consolidation alone, not to some
 difference in how aggressively the two conditions forget.
 
+## Phase 7 — workspace broadcast
+
+**A capacity-one workspace produces a causal long-delay benefit, not just an
+extra activity trace.** The controlled `workspace` harness removes the Phase 4
+self-exciting memory assembly, holds the stimulus over a 40-step delay, and
+changes only `workspace_enabled`. Across seeds 1–4, the enabled condition reached
+**0.705** mean accuracy versus **0.491** for the otherwise-identical ablation: a
+**+0.214** causal gain (criterion: enabled ≥ 0.65 and gain ≥ 0.10). The ablated
+workspace state was exactly 0 by construction; the enabled delay state averaged
+~0.94–0.99. This is the important result: a bottlenecked winner can retain and
+broadcast task-relevant state after the stimulus is gone.
+
+**The workspace is intentionally a competition, not a second unconstrained
+reservoir.** Candidate evidence is collected from the task assemblies, an
+ignition threshold admits a winner, `workspace_capacity = 1` bounds access, and
+decay prevents it becoming a permanent latch. The weak feedback/broadcast is
+then a common bias plus winner-specific feedback. When editing it, preserve the
+on/off ablation as a one-flag comparison; adding a second persistence mechanism
+would make the causal interpretation ambiguous.
+
+**Mean performance hides seed variance, so retain both the per-seed CSV and the
+mean/gap criterion.** The enabled seeds were 0.484–1.000 while the ablated
+condition stayed near chance (0.472–0.532). The pass criterion therefore uses a
+multi-seed mean and an explicit ablation gap, not a claim that every seed must
+solve the task perfectly.
+
+## Phase 8 — symbolic arithmetic curriculum
+
+**Ordered symbol binding is required before subtraction can be meaningful.** A
+numeral is represented by a position-bound one-hot assembly: left-operand `2`
+and right-operand `2` are distinct populations. The serial sequence is
+`START, lhs, operator, rhs, END`; separate `+`/`−` assemblies and a bounded set
+of non-negative answer assemblies complete the representation. Without the
+left/right distinction, `a − b` and `b − a` collapse to the same final input set.
+All arithmetic readout edges are deterministic source-ordered symbol→answer
+edges, so enabling arithmetic does not consume or perturb reservoir RNG draws.
+
+**The curriculum's generalization mechanism is transition composition, not a
+hidden operand-pair table.** Rewarded `n + 1` and `n − 1` trials populate only
+successor/predecessor action transitions. One-operation evaluation obtains an
+answer by repeatedly applying the appropriate unit transition from `lhs`, once
+per `rhs`; the controller has no `(lhs, rhs) → answer` storage. The reached state
+then participates in the fixed-duration answer-assembly readout and competition.
+This is a deliberately structured controller coupled to spiking action
+assemblies — **not** evidence that the unconstrained reservoir spontaneously
+invented symbolic arithmetic. Preserve that distinction when interpreting or
+extending Phase 8.
+
+**The held-out result decisively exceeds exact-pair memorization on the stated
+split.** Training excludes every nonzero addition with result four
+(`1+3`, `2+2`, `3+1`) while retaining the needed unit transitions and examples
+that produce answer four. Frozen evaluation over 4 seeds × 240 held trials
+reported **1.000** mean accuracy. An exact ordered-pair lookup has no entry for
+any held example and its fixed 9-answer prior is **1/9 = 0.111**; the measured
+gain was **+0.889** (criteria: held accuracy ≥ 0.30 and gain ≥ 0.18). This is a
+controlled composition result, not a random train/test split whose answers could
+be memorized.
+
+**Fixed-duration readout is an important boundary condition.** Each answer is
+read from a preconfigured final window rather than a learned stop signal. During
+curriculum training a local teaching current makes the rewarded answer assembly
+co-active with the symbols so existing pre×post eligibility can tag the plastic
+readout. At evaluation, weights and the transition model are frozen; the neutral
+probe and the composed state vote select the answer. Do not turn this into a
+variable-duration protocol without defining a new termination/control
+experiment.
+
 ## Cross-cutting engineering notes
 
 - **Every phase's mechanism is off by default.** The Phase 1 baseline run is
-  byte-identical across all four phases of development — new machinery only
+  byte-identical across all eight phases of development — new machinery only
   activates when its config flag is set. This is what keeps the determinism guard
   and the Phase 1 regression baseline meaningful as the system grows.
-- **The tests *are* the exit criteria.** Each phase's exit criterion is encoded as
-  a deterministic test (e.g. "learns above chance across 4 seeds × 1200 episodes").
-  Because the sim is deterministic, these aren't flaky — the accuracies are exact,
-  so the bounds sit safely below observed values but far above chance.
+- **Focused tests and experiment harnesses are the exit criteria.** Unit tests
+  guard invariants and mechanism prerequisites; deterministic multi-seed
+  harnesses (`train` through `arithmetic`) establish behavioural criteria and
+  write the evidence CSV. Neither category is flaky: same seed/config gives the
+  same output, so thresholds should sit safely below the observed result. Treat
+  a failure as a model regression, not noise to be ignored.
 - **Experiment harnesses are separate executables** (`sweep`/`perturb`/`train`/
-  `delay`), each with tunable constants at the top and a PASS/FAIL verdict, and
-  each emitting a CSV that a `uv`-run Python script turns into a figure. Run them
-  with `-Doptimize=ReleaseFast`.
+  `delay`/`grow`/`continual`/`workspace`/`arithmetic`), each with tunable
+  top-level constants and a PASS/FAIL verdict. They emit CSV artefacts; plotting
+  scripts currently cover raster, homeostasis, learning, delay, structural, and
+  continual experiments. Run compute-heavy harnesses with
+  `-Doptimize=ReleaseFast`.
 
 ## Open threads for later phases
 
@@ -242,3 +313,11 @@ difference in how aggressively the two conditions forget.
   is an activity-biased or error-biased growth heuristic (§8.8 #2/#4) plus a
   co-activity signal measured during a quiet baseline, not the stimulus-inflated
   rate EMA we read at the growth window.
+- Phase 7 currently establishes only a capacity-one, two-choice delayed-task
+  broadcast result. Multi-item access, interference, and a learned admission
+  policy remain open experiments; preserve the one-flag ablation before adding
+  any of them.
+- Phase 8 proves bounded transition composition against an exact-pair baseline,
+  not open-ended arithmetic or an emergent reservoir algorithm. Stronger claims
+  need larger ranges, independently held results/operators, and ablations of the
+  transition controller and teaching current.

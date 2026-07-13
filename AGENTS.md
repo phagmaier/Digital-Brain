@@ -2,7 +2,7 @@
 
 ## What this is
 
-A reproducible simulator of fixed-graph stochastic spiking neurons, written in Zig (0.16.0, per `build.zig.zon` `minimum_zig_version`). Phases 1–6 are complete (see `findings.md` for what we learned building them):
+A reproducible simulator of fixed-graph stochastic spiking neurons, written in Zig (0.16.0, per `build.zig.zon` `minimum_zig_version`). Phases 1–8 are complete; `findings.md` records the empirical lessons and measured exit-criterion results:
 
 - **P1 — fixed recurrent spiking**: 100 E/I neurons, leaky membrane, refractory, stochastic firing/release, delayed delivery.
 - **P2 — homeostasis**: per-neuron firing-rate estimate (`rate_ema`), adaptive thresholds, optional synaptic scaling (DEC-007). The update is factored into `Sim.applyHomeostasis()`: the continuous simulator calls it every step (`homeostasis_per_step = true`); the training driver sets that false and calls it once per episode (the doc's "Update homeostasis" cadence). `threshold_max` defaults to 12 — a stability rail, not a tuning knob.
@@ -10,8 +10,10 @@ A reproducible simulator of fixed-graph stochastic spiking neurons, written in Z
 - **P4 — delayed learning**: a working-memory assembly (DEC-010) — fixed self-excitation within each input group — holds the stimulus across a delay with no input, so the association is retained above chance across a nonzero delay. Longer eligibility decay spans the delay; adaptation is tuned off so it doesn't fight persistence.
 - **P5 — structural plasticity**: the reservoir graph grows and prunes connections over training (DEC-011). Synapses carry a **permanence** (resistance to pruning, distinct from weight); used synapses consolidate, disused ones decay and are pruned, and **local random search** grows weak tentative synapses toward nearby targets into a **padded CSR** (each source neuron over-allocated a fixed slot budget). A **target out-degree** set-point turns accretion into turnover. The task keeps working while the graph rewires, and homeostasis keeps activity stable — the exit criterion.
 - **P6 — consolidation**: reward-gated permanence on the **plastic** readout synapses (DEC-012) separates a *fast weight* timescale from a *slow structure* timescale. A pathway that is repeatedly part of rewarded behaviour ratchets its permanence up (§8.4's `η_q·max(0,r·e)` term, raw reward), so it resists the permanence-dependent weight decay + pruning that erodes unused tentative pathways. Continual-learning result (`zig build continual`): after training A then B, the previously-useful (consolidated) A pathway survives disuse where unconsolidated ones are pruned — the exit criterion.
+- **P7 — workspace broadcast**: a capacity-limited competition between the two input assemblies admits an igniting winner, retains it with decay, and feeds back its identity plus a weak common excitatory broadcast. `zig build workspace` establishes a causal long-delay accuracy gain over an otherwise-identical ablation.
+- **P8 — arithmetic curriculum**: `arithmetic.zig` provides a position-bound symbol-sequence encoder and bounded answer assemblies; `zig build arithmetic` trains rewarded `n ± 1` action transitions, composes them for one-operation arithmetic, and reads a fixed answer window. Its held-out nonzero `a + b = 4` split excludes every evaluated ordered pair while retaining each unit transition; the compositional controller beats a pair-lookup baseline (DEC-013).
 
-Every Phase 2/3/4/5/6 mechanism is **off by default** so the Phase 1 baseline run is unchanged; they are enabled via config (`configs/homeostasis.json`, `configs/structural.json`) or the experiment harnesses (`zig build perturb`, `zig build train`, `zig build delay`, `zig build grow`, `zig build continual`). **No workspace yet** — Phase 7 is scaffolded (config knobs present, `step()` stages marked with `// Phase N` comments) but deliberately inert.
+Every later-phase mechanism is **off by default** so the Phase 1 baseline run is unchanged; they are enabled via config or the experiment harnesses.
 
 ## Commands
 
@@ -21,8 +23,8 @@ zig build run          # build + run brain; writes CSV artefacts to cwd, prints 
 zig build run -- cfg.json   # run with a JSON config (bare Config, or a run_meta.json to replay)
 zig build test         # run all tests (both test executables, in parallel)
 
-# Experiment harnesses (each its own executable, own build root, prints a PASS/FAIL
-# verdict, writes a CSV; edit the constants at the top of the .zig to reconfigure).
+# Experiment harnesses (each its own executable/root module; prints PASS/FAIL and
+# writes a CSV; edit its top-level constants to reconfigure).
 # Compute-heavy — always add -Doptimize=ReleaseFast.
 zig build sweep        # parameter grid -> sweep.csv (one Summary row per config)
 zig build perturb      # P2: homeostasis ON/OFF under a sustained perturbation -> perturb.csv
@@ -30,6 +32,8 @@ zig build train        # P3: two-choice association training across seeds -> tra
 zig build delay        # P4: delayed association, memory vs reservoir, + recurrent-state analysis -> delay.csv, retention.csv
 zig build grow         # P5: reservoir rewiring vs performance (structural on/off A/B) -> structural.csv
 zig build continual    # P6: continual learning (train A -> B -> retest A), consolidation on/off -> continual.csv
+zig build workspace    # P7: workspace broadcast vs ablation -> workspace.csv
+zig build arithmetic   # P8: arithmetic curriculum + held-out combinations -> arithmetic.csv
 
 # Helpers. Plot scripts use uv's inline PEP-723 deps (no venv setup).
 ./scripts/check-determinism.sh [cfg.json]   # runs the binary twice, fails if artefacts differ
@@ -42,16 +46,19 @@ Single test by name filter (Zig has no per-file build target; use the compiler d
 
 ## Architecture
 
-Eight core files under `src/` (plus the four experiment executables above), all pure Zig, no dependencies:
+Core modules and experiment roots under `src/` are all pure Zig with no dependencies:
 
 - **`config.zig`** — `Config` (every knob that affects a run), `NeuronKind` (E/I + its `sign()`), `ResetRule`, and `RunMetadata` (serialized to JSON alongside every run). `Config.validate()` enforces the hard invariants before any step runs.
 - **`rng.zig`** — vendored `xoshiro256++` + `splitmix64` and the stateless key-derivation scheme. See DEC-004 below.
-- **`net.zig`** — `Neurons` and `Synapses` (structure-of-arrays), `Network.build()` which constructs the sparse graph. Under a task, `build()` interleaves three `EdgeKind`s in source order (reservoir / recurrent self-excitation / plastic readout); only reservoir edges draw RNG. Reservoir edges are marked `structural[]` (Phase 5 growth/pruning may touch them; task edges may not). With structural plasticity on, each source neuron's CSR slice is **over-allocated** to a fixed slot budget (`max_out_degree`): live edges pack the front, the rest are dead free slots for growth (DEC-011). With it off the slice is exactly the live edges, so the layout is byte-identical to before Phase 5.
+- **`net.zig`** — `Neurons` and `Synapses` (structure-of-arrays), and `Network.build()` for the sparse graph. It emits source-ordered reservoir, task recurrent, task readout, and arithmetic readout `EdgeKind`s; **only reservoir construction draws RNG**. Reservoir edges alone are `structural[]`; task/arithmetic edges are never grown or pruned. With structural plasticity on, each source's CSR slice is padded to `max_out_degree` with dead free slots; otherwise it is exactly live edges, preserving the pre-P5 byte layout.
 - **`sim.zig`** — `EventQueue` (delay ring buffer), `StepMetrics`, and `Sim` with the normative `step()` ordering, plus `Sim.applyHomeostasis()` (per-step-or-per-episode homeostatic update), `Sim.updateEligibility()` (pre/post traces + eligibility, called from `step()` when plasticity is on), `Sim.applyReward()` (the three-factor weight update **and** — under consolidation — the reward-gated permanence bump on plastic synapses, called once per episode), and `Sim.applyStructuralPlasticity()` (permanence update, permanence-dependent weight decay, pruning, and local-random-search growth — the slowest clock, called once per growth window by the driver, or every `structural_interval_steps` in a free-running sim; under consolidation it also decays/prunes plastic readout edges).
 - **`task.zig`** — the two-choice association task (DEC-008), used by both P3 (immediate) and P4 (delayed): the four-group `Layout` (input_a/input_b/action_0/action_1 carved from low excitatory IDs), stimulus injection, and the correct mapping. Dependency-light (config only) so `net.zig` can use it at build time without an import cycle.
+- **`arithmetic.zig`** — Phase 8's deterministic symbolic layout: position-bound operand assemblies, operator/control symbols, bounded answer assemblies, the held-out-combination predicate, and a unit-transition controller which can compose learned successor/predecessor actions without storing operand pairs.
+- **`arithmetic_curriculum.zig`** — the Phase 8 experiment harness: rewarded increment/decrement transition curriculum, fixed-duration spike-count answer reader, one-operation composition, and frozen held-out evaluation against an exact-pair lookup baseline.
+- **`workspace.zig`** — the Phase 7 experiment harness: workspace-on/off delayed-association training with a capacity-one bottleneck and a causal accuracy-gap verdict.
 - **`log.zig`** — `Logger` (raster + per-step metrics), CSV writers, and `Summary` (the run verdict: DEAD / SATURATED / alive-and-sparse).
 - **`main.zig`** — wires it together; runs the loop, writes artefacts atomically, prints the summary.
-- **`root.zig`** — the library module root (currently only a placeholder `add`); exists because `build.zig` builds *two* test executables — one rooted at `root.zig` (the `brain` module) and one at `main.zig` (which `refAllDecls` + explicit `_ = @import(...)` to pull in every module's tests).
+- **`root.zig`** — the library module root (currently only a placeholder `add`). `build.zig` builds two test executables: one rooted here and one at `main.zig`, whose `refAllDecls` plus explicit imports pull module tests into the executable test target.
 
 ### The load-bearing design decisions (DEC-xxx)
 
@@ -71,6 +78,8 @@ The code is written around a set of numbered design decisions referenced by ID i
 
 - **DEC-012 — consolidation is reward-gated permanence on plastic edges, and it uses RAW reward.** Phase 6 separates a *fast weight* timescale from a *slow structure* timescale so that previously-useful pathways survive disuse. The bridge is the §8.4 `η_q·max(0, r·e)` term, finally live (`consolidation_enabled`), applied in `applyReward` to the **plastic** readout synapses (the only ones that carry eligibility): a synapse repeatedly part of rewarded behaviour ratchets its permanence up. Three load-bearing choices: (a) **raw reward `r`, not the baseline-subtracted modulator** the weight update uses — once the task is mastered the reward baseline → +1 and the modulator → 0, so a baseline-subtracted term would stop consolidating exactly the pathways that are reliably correct; raw reward keeps consolidating a correct pathway for as long as it stays useful. (b) **Plastic edges consolidate on REWARD, reservoir edges on ACTIVITY** (DEC-011's co-activity) — §8.3's "consolidated == repeatedly associated with rewarded behaviour", explicitly *not* mere co-activity; so under consolidation the slow loop gives plastic edges disuse-decay only (no co-activity gain), and the positive drive comes from reward. (c) **Consolidation reuses the Phase-5 slow clock** — under `consolidation_enabled`, plastic edges also join the permanence-decay + permanence-dependent weight-decay + pruning loops, so an unused, unconsolidated readout pathway actually forgets (decays and is pruned). Consolidation requires `structural_plasticity_enabled` (validated) and is off by default. The tentative/established/consolidated "states" are just bands over permanence (§8.3), which is exactly how the `continual` harness measures survival.
 
+- **DEC-013 — arithmetic generalization is transition composition, not operand-pair lookup.** Phase 8 binds left and right numeral populations separately so subtraction remains ordered, but trains its small action-state controller only on rewarded unit transitions (`n + 1`, `n - 1`). It has storage for successor/predecessor states, deliberately **not** `(lhs,rhs)→answer` pairs. A single operation applies the relevant learned transition once per right operand count and broadcasts the reached state to its bounded answer assembly; a neutral fixed-duration probe then reads the action populations. The held-out split excludes every nonzero addition with result 4 while retaining their unit transitions and examples containing the answer itself, so an exact-pair memorizer has only its 1/9 prior whereas the compositional path is evaluated frozen. The controller's state-dependent action competition is deterministic and uses no RNG; symbolic task sampling continues to use derived keys (DEC-004).
+
 ### Reproducibility is the central constraint
 
 Two runs with the same `master_seed` must produce byte-identical spike history. This is enforced structurally, and any change that breaks it is a bug:
@@ -78,11 +87,11 @@ Two runs with the same `master_seed` must produce byte-identical spike history. 
 - **Structure-of-arrays + CSR adjacency, ascending-ID traversal.** Synapses are sorted by source; `out_start[i]..out_start[i+1]` is neuron `i`'s outgoing slice. The RNG draw sequence depends only on stable array order, never on hash-map iteration.
 - **`EventQueue` accumulates `f32` currents into future buckets** rather than queueing event records — float addition isn't associative, so fixing the accumulation order (by traversal order) removes a reproducibility hazard.
 - **The PRNG is vendored on purpose.** Naming `std.Random.DefaultPrng` isn't enough: a stdlib change would silently alter the stream. If you ever change `rng.zig`'s algorithm, bump `prng_impl_version` (it's written into `run_meta.json`).
-- **`Sim.step()` ordering is normative** (spec §9: deliver → external → background → membrane/adaptation/refractory/fire → schedule → homeostasis). Reordering changes dynamics. Phase-N stages (workspace broadcast, traces/eligibility, competition) are intentionally absent and marked in place.
+- **`Sim.step()` ordering is normative** (spec §9: deliver → external → background → membrane/adaptation/refractory/fire → schedule → homeostasis). Reordering changes dynamics. Workspace candidate competition/broadcast and traces/eligibility are active, ordered stages; preserve their locations and gating when editing `step()`.
 
 ### Tests are the phase completion checklist
 
-The tests in `sim.zig` and `net.zig` aren't incidental coverage — they encode each phase's exit criteria. Phase 1: activity neither dies nor explodes at defaults; inhibition manipulation visibly changes dynamics; release probability is statistically correct; same seed → identical history; episode reset preserves weights. Phase 2: adaptive thresholds pull an over-active network toward target; **the network returns to the target band after a sustained perturbation** (the exit criterion, as an A/B against a no-homeostasis control); synaptic scaling shrinks excitatory inputs to over-active neurons and leaves inhibition alone; both homeostats off ⇒ weights unchanged. Phase 3: eligibility tags a co-active synapse and reward moves its weight by the reward sign; plasticity disabled ⇒ task synapses fixed; **the two-choice association is learned above chance across seeds** (4 seeds × 1200 episodes, deterministic). Phase 4: self-excitation adds the expected fixed recurrent edges; **the delayed association is retained above chance across seeds** at a nonzero delay (the exit criterion — the mechanism test is deliberately behavioural/end-to-end, since stimulus-specific persistence is emergent from training, not visible in a fresh network). Phase 5: the padded build over-allocates free slots and honours the budget while leaving the reservoir's RNG stream unperturbed (task edges are non-structural); a weak/low-permanence/aged synapse is pruned and growth installs a weak tentative *local* edge into a free slot; the live out-degree never exceeds the slot budget; same seed → identical structural evolution; and **the two-choice association still learns above chance with the reservoir rewiring underneath it, and the connections demonstrably change** (the exit criterion). Phase 6: reward raises the permanence of a rewarded plastic synapse (and leaves it untouched when consolidation is off); consolidation makes an unconsolidated plastic synapse prunable while a consolidated one survives; consolidation requires structural plasticity (validation); and **after training A then B, the consolidated (previously-useful) pathways survive disuse markedly better than the tentative ones** (the exit criterion). Treat a failure in these as "the model is wrong" rather than "the test is flaky," and keep them passing when changing dynamics.
+The tests in `sim.zig`, `net.zig`, and `arithmetic.zig` aren't incidental coverage — they encode mechanism invariants and phase exit-criterion prerequisites; harnesses encode the multi-seed behavioural verdicts. Phase 1: activity neither dies nor explodes at defaults; inhibition manipulation visibly changes dynamics; release probability is statistically correct; same seed → identical history; episode reset preserves weights. Phase 2: adaptive thresholds pull an over-active network toward target; **the network returns to the target band after a sustained perturbation** (the exit criterion, as an A/B against a no-homeostasis control); synaptic scaling shrinks excitatory inputs to over-active neurons and leaves inhibition alone; both homeostats off ⇒ weights unchanged. Phase 3: eligibility tags a co-active synapse and reward moves its weight by the reward sign; plasticity disabled ⇒ task synapses fixed; **the two-choice association is learned above chance across seeds** (4 seeds × 1200 episodes, deterministic). Phase 4: self-excitation adds the expected fixed recurrent edges; **the delayed association is retained above chance across seeds** at a nonzero delay (the exit criterion — the mechanism test is deliberately behavioural/end-to-end, since stimulus-specific persistence is emergent from training, not visible in a fresh network). Phase 5: the padded build over-allocates free slots and honours the budget while leaving the reservoir's RNG stream unperturbed (task edges are non-structural); a weak/low-permanence/aged synapse is pruned and growth installs a weak tentative *local* edge into a free slot; the live out-degree never exceeds the slot budget; same seed → identical structural evolution; and **the two-choice association still learns above chance with the reservoir rewiring underneath it, and the connections demonstrably change** (the exit criterion). Phase 6: reward raises the permanence of a rewarded plastic synapse (and leaves it untouched when consolidation is off); consolidation makes an unconsolidated plastic synapse prunable while a consolidated one survives; consolidation requires structural plasticity (validation); and **after training A then B, the consolidated (previously-useful) pathways survive disuse markedly better than the tentative ones** (the exit criterion). Phase 7: deterministic capacity/ignition/decay/broadcast mechanics and a workspace-on vs workspace-off causal delayed-task ablation. Phase 8: position-bound symbol encodings and action assemblies are disjoint; unit successor transitions compose an unseen operand pair; and `zig build arithmetic` must beat its exact-pair lookup baseline on the frozen held-out-combination split. Treat a failure in these as "the model is wrong" rather than "the test is flaky," and keep them passing when changing dynamics.
 
 ## Conventions
 
@@ -90,15 +99,18 @@ The tests in `sim.zig` and `net.zig` aren't incidental coverage — they encode 
 - Allocator is threaded explicitly (`gpa`); every `init` has a matching `deinit`, and `errdefer` cleanup is paired at each allocation site.
 - Uses the Zig 0.16 `std.Io` API (`std.Io.Writer`, `createFileAtomic`, `init: std.process.Init` in `main`) — not the older `std.fs`/`std.io` shapes.
 
-## ZIG 
+## Zig version and reference material
 
-- This project is written in zig version 0.16.0
-- This is a fairly new version so if you need to know specific zig api calls or standard library functions/structs please use context7
+- Target **Zig 0.16.0**. For unfamiliar Zig 0.16 APIs, query Context7 rather than relying on older stdlib examples.
+- `implimentation_doc.md` is the long-form project/specification reference. Search it narrowly only when the relevant module, DEC, and findings do not resolve a design question.
 
-## Additional information if needed
+## Agent workflow
 
-Note that if you are ever confused about terms or about what we are building and the specifications of what we are building there is a very large detailed obsidian note that explains the project and every phase. Note that it is very long and detailed though only query/search inside it when you are confused and need more information you can look at implimentation_doc.md
+1. Read the relevant module and its DEC before changing dynamics; consult `implimentation_doc.md` only for unresolved design questions.
+2. Preserve default-off behavior and DEC-004 determinism. Add a focused regression test whenever changing a mechanism or graph layout.
+3. Run `zig fmt` on touched Zig files, then `zig build test`. Run the affected harness with `-Doptimize=ReleaseFast` when changing an exit criterion.
+4. Treat an experiment verdict failure as a model regression, not test flakiness. Do not relax thresholds without documenting a scientific reason in `findings.md`.
 
 ## Findings
 
-Findings through stages 0-4 are in the file findings.md
+`findings.md` contains Phases 1–8, including the measured Phase 7 workspace ablation and Phase 8 held-out-combination result.

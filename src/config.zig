@@ -299,6 +299,26 @@ pub const Config = struct {
     /// take many rewarded episodes to consolidate, so noise doesn't stick.
     consolidation_lr: f32 = 0.02,
 
+    // -- arithmetic curriculum (Phase 8, DEC-013) ------------------------
+    // A separate, bounded symbolic layout for the arithmetic harness.  Each
+    // sequence position owns its own numeral assembly, which preserves operand
+    // order; action assemblies cover non-negative answers 0..2*max_operand.
+    // All task edges are deterministic all-to-all symbol->action readouts and
+    // draw no RNG, preserving the reservoir stream (DEC-004).
+    arithmetic_enabled: bool = false,
+    arithmetic_group_size: u32 = 6,
+    arithmetic_max_operand: u8 = 4,
+    arithmetic_input_current: f32 = 1.5,
+    arithmetic_readout_weight_init: f32 = 0.2,
+    arithmetic_readout_p_release: f32 = 1.0,
+    /// A neutral, fixed-duration answer clock applied equally to every action
+    /// assembly. It removes learned termination without leaking the answer.
+    arithmetic_answer_probe_current: f32 = 0.5,
+    arithmetic_symbol_steps: u32 = 12,
+    arithmetic_gap_steps: u32 = 3,
+    arithmetic_settle_steps: u32 = 15,
+    arithmetic_readout_steps: u32 = 20,
+
     // -- workspace-inspired broadcast (Phase 7) --------------------------
     // A deliberately small, task-scoped global-workspace metaphor. The two
     // input assemblies are the only candidate writers; their recent activity
@@ -372,6 +392,28 @@ pub const Config = struct {
             const n_exc: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(self.n_neurons)) * self.excitatory_fraction));
             if (self.task_group_size == 0) return error.EmptyTaskGroup;
             if (4 * self.task_group_size > n_exc) return error.TaskGroupsExceedExcitatory;
+        }
+
+        // Phase 8 arithmetic layout. The position-bound symbol assemblies plus
+        // answer assemblies are all carved from the low excitatory IDs; require
+        // room before net.zig constructs a single edge. Limiting the tiny
+        // curriculum's operand range also keeps the u8 answer interface exact.
+        if (self.arithmetic_enabled) {
+            if (self.arithmetic_group_size == 0) return error.EmptyArithmeticGroup;
+            if (self.arithmetic_max_operand == 0 or self.arithmetic_max_operand > 32)
+                return error.BadArithmeticOperandRange;
+            if (self.arithmetic_readout_p_release < 0.0 or self.arithmetic_readout_p_release > 1.0)
+                return error.BadArithmeticReleaseProbability;
+            if (self.arithmetic_symbol_steps == 0 or self.arithmetic_readout_steps == 0)
+                return error.ZeroArithmeticWindow;
+            if (self.arithmetic_input_current < 0.0 or self.arithmetic_answer_probe_current < 0.0 or
+                self.arithmetic_readout_weight_init < 0.0)
+                return error.NegativeArithmeticCurrentOrWeight;
+            const max_operand: u32 = self.arithmetic_max_operand;
+            const symbol_groups = 4 + 2 * (max_operand + 1); // START/END/+/- + operands
+            const action_groups = 2 * max_operand + 1;
+            const required = (symbol_groups + action_groups) * self.arithmetic_group_size;
+            if (required > self.nExcitatory()) return error.ArithmeticGroupsExceedExcitatory;
         }
 
         // Phase 5 structural plasticity knobs. Permanence lives in [0,1]; the
@@ -490,6 +532,13 @@ test "config: negative weights are rejected" {
 test "config: neuron sign convention" {
     try std.testing.expectEqual(@as(f32, 1.0), NeuronKind.excitatory.sign());
     try std.testing.expectEqual(@as(f32, -1.0), NeuronKind.inhibitory.sign());
+}
+
+test "config: arithmetic layout must fit the excitatory population" {
+    var c = Config{ .arithmetic_enabled = true };
+    try std.testing.expectError(error.ArithmeticGroupsExceedExcitatory, c.validate());
+    c.n_neurons = 200;
+    try c.validate();
 }
 
 test "config: workspace requires task candidates and a finite capacity" {

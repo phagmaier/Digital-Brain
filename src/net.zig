@@ -14,6 +14,7 @@ const std = @import("std");
 const cfg = @import("config.zig");
 const rng = @import("rng.zig");
 const task = @import("task.zig");
+const arithmetic = @import("arithmetic.zig");
 
 const Allocator = std.mem.Allocator;
 const NeuronKind = cfg.NeuronKind;
@@ -23,7 +24,7 @@ pub const SynapseId = u32;
 
 /// What kind of edge the builder is emitting. Build-time only; at runtime the
 /// distinction survives as `plastic[]` (readout) and the weight values.
-const EdgeKind = enum { reservoir, recurrent, readout };
+const EdgeKind = enum { reservoir, recurrent, readout, arithmetic_readout };
 
 // ---------------------------------------------------------------------------
 // Neurons
@@ -218,6 +219,7 @@ pub const Network = struct {
         var edge_kind = try std.ArrayList(EdgeKind).initCapacity(gpa, n * 8);
         defer edge_kind.deinit(gpa);
         const task_layout = task.layout(c);
+        const arithmetic_layout = arithmetic.layout(c);
 
         const two_sigma_sq = 2.0 * c.spatial_sigma * c.spatial_sigma;
 
@@ -288,6 +290,20 @@ pub const Network = struct {
                     try src.append(gpa, @intCast(i));
                     try dst.append(gpa, a);
                     try edge_kind.append(gpa, .readout);
+                }
+            }
+
+            // Phase 8 arithmetic edges: every position-bound symbol source
+            // reaches every bounded answer assembly. As with Phase 3 task
+            // edges, emit in source order and consume no RNG (DEC-004/013).
+            if (c.arithmetic_enabled and arithmetic_layout.isSymbol(@intCast(i))) {
+                const first = arithmetic_layout.actionGroup(0).lo;
+                const last = arithmetic_layout.actionGroup(2 * c.arithmetic_max_operand).hi;
+                var answer: u32 = first;
+                while (answer < last) : (answer += 1) {
+                    try src.append(gpa, @intCast(i));
+                    try dst.append(gpa, answer);
+                    try edge_kind.append(gpa, .arithmetic_readout);
                 }
             }
 
@@ -378,6 +394,16 @@ pub const Network = struct {
                         syn.delay[w] = c.min_delay;
                         syn.plastic[w] = false;
                         syn.structural[w] = false; // working memory, never pruned
+                    },
+                    .arithmetic_readout => {
+                        // Phase 8 trainable symbol-sequence readout. Its source
+                        // and target assemblies are deterministic and all source
+                        // neurons are excitatory; only reward learning changes it.
+                        syn.weight[w] = c.arithmetic_readout_weight_init;
+                        syn.p_release[w] = c.arithmetic_readout_p_release;
+                        syn.delay[w] = c.min_delay;
+                        syn.plastic[w] = c.plasticity_enabled;
+                        syn.structural[w] = false;
                     },
                     .reservoir => {
                         syn.weight[w] = switch (neurons.kind[s]) {
@@ -700,4 +726,46 @@ test "net: enabling structural plasticity does not perturb the reservoir's RNG s
         pk += 1;
     }
     try testing.expectEqual(plain.synapses.n, @as(u32, @intCast(pk)));
+}
+
+test "net: arithmetic symbols get plastic answer readout without perturbing reservoir RNG" {
+    const gpa = testing.allocator;
+    const seed: u64 = 91;
+    var plain = try Network.build(gpa, .{ .master_seed = seed, .n_neurons = 160, .connection_density = 0.04 });
+    defer plain.deinit(gpa);
+    const c = cfg.Config{
+        .master_seed = seed,
+        .n_neurons = 160,
+        .connection_density = 0.04,
+        .arithmetic_enabled = true,
+        .arithmetic_group_size = 5,
+        .arithmetic_max_operand = 4,
+        .plasticity_enabled = true,
+    };
+    var with_arithmetic = try Network.build(gpa, c);
+    defer with_arithmetic.deinit(gpa);
+    const l = arithmetic.layout(c);
+
+    var readout_count: u32 = 0;
+    var plain_index: usize = 0;
+    for (0..with_arithmetic.synapses.n) |k| {
+        const s = with_arithmetic.synapses;
+        if (s.plastic[k]) {
+            readout_count += 1;
+            try testing.expect(l.isSymbol(s.source[k]));
+            try testing.expect(l.isAction(s.target[k]));
+            try testing.expect(!s.structural[k]);
+            continue;
+        }
+        try testing.expectEqual(plain.synapses.source[plain_index], s.source[k]);
+        try testing.expectEqual(plain.synapses.target[plain_index], s.target[k]);
+        try testing.expectEqual(plain.synapses.weight[plain_index], s.weight[k]);
+        try testing.expectEqual(plain.synapses.delay[plain_index], s.delay[k]);
+        plain_index += 1;
+    }
+    try testing.expectEqual(plain.synapses.n, @as(u32, @intCast(plain_index)));
+    try testing.expectEqual(
+        l.symbolGroupCount() * c.arithmetic_group_size * l.actionCount() * c.arithmetic_group_size,
+        readout_count,
+    );
 }

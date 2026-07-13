@@ -137,6 +137,7 @@ test {
     _ = cfg;
     _ = @import("net.zig");
     _ = @import("task.zig");
+    _ = @import("arithmetic.zig");
     _ = sim;
     _ = log;
 }
