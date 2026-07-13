@@ -1389,7 +1389,82 @@ for episode in training_episodes:
 
 ---
 
-## 20. Testing
+## 20. Engineering considerations for Zig
+
+### Data layout
+
+Prefer compact arrays over deeply nested heap objects.
+
+Possible structure-of-arrays layout:
+
+```c
+NeuronState:
+    potentials: []f32
+    thresholds: []f32
+    adaptation: []f32
+    firing_rates: []f32
+    refractory: []u16
+    fired: []bool
+    neuron_types: []NeuronType
+    positions_x: []f32
+    positions_y: []f32
+```
+
+Synapses:
+
+```c
+SynapseStore:
+    sources: []NeuronId
+    targets: []NeuronId
+    weights: []f32
+    release_probabilities: []f32
+    eligibility: []f32
+    permanence: []f32
+    delays: []u16
+    alive: []bool
+```
+
+Adjacency can use:
+
+- compressed index ranges per source;
+- per-neuron dynamic lists;
+- stable synapse IDs plus free-list reuse.
+
+For early versions, clarity matters more than maximum performance.
+
+### Event queue
+
+For bounded delays, use a ring buffer:
+
+```c
+event_buckets[maximum_delay + 1]
+```
+
+At timestep $t$:
+
+```c
+bucket_index = t % bucket_count
+```
+
+Deliver and clear that bucket, then schedule future events into the appropriate future bucket.
+
+### Randomness
+
+Use separate random streams or derived seeds for:
+
+- initialization;
+- firing;
+- synaptic release;
+- task sampling;
+- structural growth.
+
+This makes experiments easier to reproduce and isolate.
+
+### Floating-point precision
+
+`f32` should be more than sufficient for this simulator. Numerical precision is unlikely to be the limiting factor.
+
+### Testing
 
 Unit-test:
 
@@ -1529,6 +1604,54 @@ That would be a substantive conclusion.
 
 ---
 
+## 24. Reading and reference map
+
+### Eligibility traces and local recurrent learning
+
+- Bellec et al. (2020), **A solution to the learning dilemma for recurrent networks of spiking neurons**. Introduces e-prop, combining local eligibility traces with learning signals.
+- [https://doi.org/10.1038/s41467-020-17236-y](https://doi.org/10.1038/s41467-020-17236-y)
+- Wang et al. (2026), **Model-agnostic linear-memory online learning in spiking neural networks**. A recent local online-learning direction using eligibility-like temporal mechanisms.
+- [https://doi.org/10.1038/s41467-026-68453-w](https://doi.org/10.1038/s41467-026-68453-w)
+### Structural plasticity
+
+- Fauth & Tetzlaff (2016), **Opposing Effects of Neuronal Activity on Structural Plasticity**. Reviews Hebbian and homeostatic structural plasticity.
+- [https://doi.org/10.3389/fnana.2016.00075](https://doi.org/10.3389/fnana.2016.00075)
+- Yuan et al. (2023), **Incorporating structural plasticity into self-organization recurrent network with homeostasis**. Directly relevant to combining rewiring, STDP, and homeostatic processes.
+- [https://doi.org/10.3389/fnins.2023.1224752](https://doi.org/10.3389/fnins.2023.1224752)
+- Bogdan et al. (2018), **Structural Plasticity on the SpiNNaker Many-Core Neuromorphic System**. Includes synaptic rewiring and STDP in a spatially organized system.
+- [https://doi.org/10.3389/fnins.2018.00434](https://doi.org/10.3389/fnins.2018.00434)
+- Pan et al. (2023), **Adaptive structure evolution and biologically plausible learning in a liquid state machine**.
+- [https://doi.org/10.1038/s41598-023-43488-x](https://doi.org/10.1038/s41598-023-43488-x)
+### Stochastic synapses and probabilistic computation
+
+- Dutta et al. (2022), **Neural sampling machine with stochastic synapse allows brain-like learning and inference**.
+- [https://doi.org/10.1038/s41467-022-30305-8](https://doi.org/10.1038/s41467-022-30305-8)
+- Dürst et al. (2022), **Vesicular release probability sets the strength of individual Schaffer collateral synapses**.
+- [https://doi.org/10.1038/s41467-022-33565-6](https://doi.org/10.1038/s41467-022-33565-6)
+- Buesing et al. (2011), **Neural Dynamics as Sampling: A Model for Stochastic Computation in Recurrent Networks of Spiking Neurons**.
+- [https://doi.org/10.1371/journal.pcbi.1002211](https://doi.org/10.1371/journal.pcbi.1002211)
+### Homeostasis and intrinsic plasticity
+
+- Zhang et al. (2019), **Information-Theoretic Intrinsic Plasticity for Online Unsupervised Learning in Spiking Neural Networks**.
+- [https://doi.org/10.3389/fnins.2019.00031](https://doi.org/10.3389/fnins.2019.00031)
+- Zhang et al. (2024), **Composing recurrent spiking neural networks using locally distributed intrinsic plasticity**.
+- [https://doi.org/10.3389/fnins.2024.1412559](https://doi.org/10.3389/fnins.2024.1412559)
+### Global workspace
+
+- Cogitate Consortium (2025), **Adversarial testing of global neuronal workspace and integrated information theories of consciousness**.
+- [https://doi.org/10.1038/s41586-025-08888-1](https://doi.org/10.1038/s41586-025-08888-1)
+- Martín-Signes et al. (2024), **Streams of conscious visual experience**. Contains a concise description of global broadcast and competition motifs.
+- [https://doi.org/10.1038/s42003-024-06593-9](https://doi.org/10.1038/s42003-024-06593-9)
+> [!caution]
+> Global neuronal workspace theory is a theory of conscious access, not an established recipe for an AI output layer. Use its competition-and-broadcast motif as an engineering hypothesis.
+
+### Learned plasticity rules
+
+- Shervani-Tabar et al. (2023), **Meta-learning biologically plausible plasticity rules with random feedback pathways**.
+- [https://doi.org/10.1038/s41467-023-37562-1](https://doi.org/10.1038/s41467-023-37562-1)
+This may become interesting much later: instead of manually choosing a plasticity equation forever, an outer optimization process could search for local rules. It should not be part of the first implementation.
+
+---
 
 ## 25. Vocabulary
 
@@ -1547,6 +1670,31 @@ That would be a substantive conclusion.
 | **Global workspace**           | A limited-capacity mechanism in which selected information becomes broadly broadcast.                            |
 | **Ablation**                   | Removing or disabling one mechanism to determine its causal contribution.                                        |
 
+---
+
+## 26. Immediate next action
+
+Implement **Phase 0 and Phase 1 only**.
+
+The first coding target is:
+
+> A reproducible simulator of 100 fixed-graph stochastic spiking neurons with excitatory/inhibitory types, membrane leak, refractory periods, probabilistic synaptic transmission, delayed events, and raster logging.
+
+Do not implement learning, growth, arithmetic, or the workspace until this network can maintain a stable, interpretable activity regime.
+
+### Phase 1 completion checklist
+
+- [ ] Same seed produces identical spike history
+- [ ] Excitatory spikes increase target potential
+- [ ] Inhibitory spikes decrease target potential
+- [ ] Membrane potential leaks toward rest
+- [ ] Refractory period prevents immediate refiring
+- [ ] Synaptic release probability behaves statistically correctly
+- [ ] Delays deliver events at the expected timestep
+- [ ] Activity remains nonzero for a useful interval
+- [ ] Activity does not explode into constant firing
+- [ ] Raster data can be plotted or inspected
+- [ ] Configuration and seed are saved with each run
 
 ---
 
@@ -1554,3 +1702,8 @@ That would be a substantive conclusion.
 
 > **Build one mechanism, prove that it behaves correctly, measure its effect, and only then add the next mechanism.**
 
+
+## NOTES
+
+1. Only the readout learns, not the recurrent reservoir. This is the DEC-008 design choice for reliability. The full recurrent net learning is a bigger scope (and not what "immediate association" requires).
+2. Learning is exploration-limited (~600-episode plateau then takeoff). Raising the learning rate barely helped. Faster learning would need better credit assignment — winner-take-all/lateral inhibition between action groups, or crediting only the chosen action. Not needed for the criterion, but the natural lever if you later want snappier learning or a working-memory delay version (the doc's delay step, which I kept at 0 for "immediate").
