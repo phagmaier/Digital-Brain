@@ -299,6 +299,33 @@ pub const Config = struct {
     /// take many rewarded episodes to consolidate, so noise doesn't stick.
     consolidation_lr: f32 = 0.02,
 
+    // -- workspace-inspired broadcast (Phase 7) --------------------------
+    // A deliberately small, task-scoped global-workspace metaphor. The two
+    // input assemblies are the only candidate writers; their recent activity
+    // competes for `workspace_capacity` slots. An assembly must cross the
+    // ignition threshold before it is admitted. The admitted identity decays
+    // unless its candidate activity refreshes it, then feeds current back to
+    // that candidate and a weak common broadcast to the wider excitatory pool.
+    // This is a bottlenecked broadcast, not unrestricted shared memory.
+    // OFF by default so Phases 1--6 remain byte-identical.
+    workspace_enabled: bool = false,
+    /// Number of simultaneously broadcast candidate assemblies. There are
+    /// currently two task input candidates, so this is in [1, 2].
+    workspace_capacity: u32 = 1,
+    /// Leaky evidence trace for each candidate assembly's mean spike activity.
+    workspace_candidate_decay: f32 = 0.85,
+    /// Minimum candidate evidence required for competitive admission.
+    workspace_ignition_threshold: f32 = 0.75,
+    /// Persistence of an admitted workspace item per simulation step.
+    workspace_state_decay: f32 = 0.90,
+    /// Identity-preserving feedback applied to neurons in the winning candidate
+    /// assembly. This is what lets a selected representation remain available.
+    workspace_feedback_current: f32 = 0.45,
+    /// Small, identity-neutral current sent to every non-input excitatory neuron
+    /// while any workspace item is active. It is the broad broadcast component;
+    /// it cannot by itself encode the answer or bypass the plastic readout.
+    workspace_broadcast_current: f32 = 0.03,
+
     // -- run --------------------------------------------------------------
     steps: u32 = 2000,
 
@@ -375,6 +402,22 @@ pub const Config = struct {
                 return error.ConsolidationNeedsStructuralPlasticity;
             if (self.consolidation_lr < 0.0) return error.BadConsolidationLr;
         }
+
+        // Phase 7's candidate assemblies are the two task input groups. Keeping
+        // the writer set fixed and tiny is the anti-unrestricted-memory rule.
+        if (self.workspace_enabled) {
+            if (!self.task_enabled) return error.WorkspaceNeedsTask;
+            if (self.workspace_capacity == 0 or self.workspace_capacity > 2)
+                return error.BadWorkspaceCapacity;
+            if (self.workspace_candidate_decay < 0.0 or self.workspace_candidate_decay >= 1.0)
+                return error.BadWorkspaceCandidateDecay;
+            if (self.workspace_state_decay < 0.0 or self.workspace_state_decay >= 1.0)
+                return error.BadWorkspaceStateDecay;
+            if (self.workspace_ignition_threshold <= 0.0)
+                return error.BadWorkspaceIgnitionThreshold;
+            if (self.workspace_feedback_current < 0.0 or self.workspace_broadcast_current < 0.0)
+                return error.NegativeWorkspaceCurrent;
+        }
     }
 
     /// Number of excitatory neurons, by the same deterministic rule net.zig uses.
@@ -447,6 +490,16 @@ test "config: negative weights are rejected" {
 test "config: neuron sign convention" {
     try std.testing.expectEqual(@as(f32, 1.0), NeuronKind.excitatory.sign());
     try std.testing.expectEqual(@as(f32, -1.0), NeuronKind.inhibitory.sign());
+}
+
+test "config: workspace requires task candidates and a finite capacity" {
+    var c = Config{ .workspace_enabled = true };
+    try std.testing.expectError(error.WorkspaceNeedsTask, c.validate());
+    c.task_enabled = true;
+    c.workspace_capacity = 0;
+    try std.testing.expectError(error.BadWorkspaceCapacity, c.validate());
+    c.workspace_capacity = 1;
+    try c.validate();
 }
 
 test "config: parseJson reads a bare Config object and applies defaults for the rest" {

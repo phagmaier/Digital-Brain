@@ -1,12 +1,14 @@
 //! The simulator. Fixed step ordering (spec §9), rest-relative membrane,
 //! stochastic firing, stochastic release, delayed delivery via a ring buffer.
 //!
-//! No learning. No growth. No workspace. Phase 1 only.
+//! Phase 1 core, extended by gated Phases 2--7 mechanisms below. Every later
+//! mechanism is off by default so the baseline dynamics remain unchanged.
 
 const std = @import("std");
 const cfg = @import("config.zig");
 const net = @import("net.zig");
 const rng = @import("rng.zig");
+const task_mod = @import("task.zig");
 
 const Allocator = std.mem.Allocator;
 const Network = net.Network;
@@ -105,6 +107,10 @@ pub const StepMetrics = struct {
     /// Population-mean per-neuron firing-rate EMA (rho_i). The homeostat's
     /// input signal; converges toward target_rate when regulation is working.
     mean_rate_ema: f32 = 0,
+    /// Phase 7 observability: total activation in the capacity-limited workspace
+    /// and its strongest candidate (0=A, 1=B, -1=empty).
+    workspace_state: f32 = 0,
+    workspace_winner: i8 = -1,
 };
 
 /// What a single structural-plasticity event changed. Returned by
@@ -143,6 +149,13 @@ pub const Sim = struct {
     /// stream so each growth event is reproducible AND independent of how many
     /// firing/release draws happened (DEC-004). SLOW state: never reset.
     growth_counter: u32 = 0,
+
+    // Phase 7 -- exactly two candidate writers, the task's input A/B
+    // assemblies. Fixed-size state makes the capacity bottleneck explicit and
+    // keeps the mechanism deterministic and allocation-free.
+    workspace_candidate_activity: [2]f32 = .{ 0, 0 },
+    workspace_state: [2]f32 = .{ 0, 0 },
+    workspace_winner: ?u1 = null,
 
     t: u32 = 0,
 
@@ -188,6 +201,12 @@ pub const Sim = struct {
         // Eligibility is per-episode fast state: a synapse's tag must not carry
         // credit from a previous example into this one's reward (DEC-005/DEC-009).
         @memset(self.network.synapses.eligibility, 0);
+        // Workspace evidence and admitted contents are fast, trial-local state:
+        // carrying them across examples would be the same false-learning leak
+        // DEC-005 forbids for membrane state and eligibility.
+        @memset(&self.workspace_candidate_activity, 0);
+        @memset(&self.workspace_state, 0);
+        self.workspace_winner = null;
         self.t = 0;
         // RNG streams and reward baseline: continue, never reset.
     }
@@ -217,7 +236,10 @@ pub const Sim = struct {
         //     NOT beta. See config.zig.
         for (self.current) |*cur| cur.* += c.background_current;
 
-        // 3. Workspace broadcast -- Phase 7. Deliberately absent.
+        // 3. Phase 7 workspace broadcast. The previous step's admitted
+        // candidate feeds back its identity and a weak broad signal before this
+        // step's membrane update; competition below only affects the NEXT step.
+        if (c.workspace_enabled) self.injectWorkspaceBroadcast();
 
         // 4-6. Membrane, adaptation, refractory, firing probability, spike sample.
         var u_sum: f32 = 0;
@@ -305,7 +327,9 @@ pub const Sim = struct {
         //      no RNG, stable traversal order -> no reproducibility hazard.
         if (c.plasticity_enabled) self.updateEligibility();
 
-        // 10.  Workspace competition -- Phase 7. Deliberately absent.
+        // 10. Phase 7 candidate evidence, competitive ignition, capacity and
+        //     decay. It reads this step's spikes and controls the next broadcast.
+        if (c.workspace_enabled) self.updateWorkspace();
 
         // 11. Homeostasis (Phase 2). In the continuous simulator this runs every
         //     step. The Phase 3 episode driver instead sets homeostasis_per_step
@@ -334,6 +358,8 @@ pub const Sim = struct {
         }
         m.mean_threshold = th_sum / @as(f32, @floatFromInt(n));
         m.mean_rate_ema = rho_sum / @as(f32, @floatFromInt(n));
+        m.workspace_state = self.workspace_state[0] + self.workspace_state[1];
+        m.workspace_winner = if (self.workspace_winner) |winner| @intCast(winner) else -1;
 
         self.t += 1;
         return m;
@@ -372,6 +398,93 @@ pub const Sim = struct {
                 const factor = 1.0 + c.weight_norm_lr * (c.target_rate - nrn.rate_ema[j]);
                 syn.weight[k] = std.math.clamp(syn.weight[k] * factor, 0.0, c.weight_max);
             }
+        }
+    }
+
+    /// Inject the previous workspace state as current. The candidate-specific
+    /// feedback preserves the selected representation; the small common current
+    /// makes the selected state broadly available to the rest of the excitatory
+    /// network without hard-wiring either candidate to either action.
+    fn injectWorkspaceBroadcast(self: *Sim) void {
+        const c = self.network.config;
+        const l = task_mod.layout(c);
+        var total: f32 = 0;
+
+        for (0..2) |candidate| {
+            const strength = self.workspace_state[candidate];
+            total += strength;
+            const group = if (candidate == 0) l.input_a else l.input_b;
+            for (group.lo..group.hi) |i| {
+                self.current[i] += c.workspace_feedback_current * strength;
+            }
+        }
+
+        // Broad feedback is deliberately identity-neutral: it can facilitate a
+        // representation being read out but cannot encode the fixed A->0/B->1
+        // answer or bypass the learned plastic readout (DEC-008).
+        if (total > 0) {
+            const nrn = &self.network.neurons;
+            for (0..nrn.n) |i| {
+                const id: net.NeuronId = @intCast(i);
+                if (nrn.kind[i] == .excitatory and !l.isInput(id)) {
+                    self.current[i] += c.workspace_broadcast_current * total;
+                }
+            }
+        }
+    }
+
+    /// Update the two task-input candidates, then admit only the top `capacity`
+    /// candidates that crossed ignition. Strict greater-than tie-breaking makes
+    /// A beat B deterministically on an exact tie; no RNG is consumed here.
+    fn updateWorkspace(self: *Sim) void {
+        const c = self.network.config;
+        const l = task_mod.layout(c);
+        const nrn = &self.network.neurons;
+
+        for (0..2) |candidate| {
+            const group = if (candidate == 0) l.input_a else l.input_b;
+            var spikes: u32 = 0;
+            for (group.lo..group.hi) |i| spikes += @intFromBool(nrn.fired[i]);
+            const rate = @as(f32, @floatFromInt(spikes)) /
+                @as(f32, @floatFromInt(group.count()));
+            self.workspace_candidate_activity[candidate] =
+                c.workspace_candidate_decay * self.workspace_candidate_activity[candidate] + rate;
+            self.workspace_state[candidate] *= c.workspace_state_decay;
+        }
+
+        var selected = [_]bool{ false, false };
+        self.workspace_winner = null;
+        var admitted: u32 = 0;
+        while (admitted < c.workspace_capacity) : (admitted += 1) {
+            var best: ?usize = null;
+            for (0..2) |candidate| {
+                if (selected[candidate] or
+                    self.workspace_candidate_activity[candidate] < c.workspace_ignition_threshold)
+                    continue;
+                if (best == null or self.workspace_candidate_activity[candidate] >
+                    self.workspace_candidate_activity[best.?])
+                {
+                    best = candidate;
+                }
+            }
+            const candidate = best orelse break;
+            selected[candidate] = true;
+            // encode(candidate): an admitted item has unit strength; repeated
+            // wins refresh it, while an unrefreshed item only decays.
+            self.workspace_state[candidate] = @max(self.workspace_state[candidate], 1.0);
+            if (self.workspace_winner == null) self.workspace_winner = @intCast(candidate);
+        }
+
+        // An item can remain broadcast while it decays below ignition; expose
+        // that retained winner in logs until the state has fully disappeared.
+        if (self.workspace_winner == null) {
+            var strongest: ?usize = null;
+            for (0..2) |candidate| {
+                if (self.workspace_state[candidate] <= 1e-6) continue;
+                if (strongest == null or self.workspace_state[candidate] > self.workspace_state[strongest.?])
+                    strongest = candidate;
+            }
+            if (strongest) |candidate| self.workspace_winner = @intCast(candidate);
         }
     }
 
@@ -639,6 +752,129 @@ fn sigmoid(x: f32) f32 {
 // ===========================================================================
 
 const testing = std.testing;
+
+/// A compact version of the Phase 7 harness episode loop, kept beside the
+/// regression assertion so an ablation result cannot silently drift away.
+fn workspaceDelayedAccuracy(gpa: Allocator, seed: u64, workspace_enabled: bool) !f64 {
+    const c = cfg.Config{
+        .master_seed = seed,
+        .n_neurons = 100,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .homeostasis_enabled = true,
+        .homeostasis_per_step = false,
+        .target_rate = 0.05,
+        .homeostasis_lr = 0.05,
+        .task_group_size = 8,
+        .eligibility_decay = 0.97,
+        .adaptation_enabled = false,
+        .task_recurrent_weight = 0.0,
+        .workspace_enabled = workspace_enabled,
+        .workspace_capacity = 1,
+        .workspace_candidate_decay = 0.85,
+        .workspace_ignition_threshold = 0.75,
+        .workspace_state_decay = 0.90,
+        .workspace_feedback_current = 0.45,
+        .workspace_broadcast_current = 0.03,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = task_mod.layout(c);
+    const ext = try gpa.alloc(f32, c.n_neurons);
+    defer gpa.free(ext);
+
+    const n_episodes: u32 = 1200;
+    const final_window: u32 = 250;
+    var correct_in_window: u32 = 0;
+    for (0..n_episodes) |episode| {
+        s.resetEpisode();
+        var trng = rng.derived(seed, .task, @intCast(episode));
+        const choice: task_mod.Choice = if (trng.below(2) == 0) .a else .b;
+        l.fillStimulus(choice, c.task_input_current, ext);
+        for (0..30) |_| _ = s.step(ext);
+        for (0..40) |_| _ = s.step(null);
+
+        var count0: u32 = 0;
+        var count1: u32 = 0;
+        for (0..20) |_| {
+            _ = s.step(null);
+            for (l.action_0.lo..l.action_0.hi) |i| count0 += @intFromBool(s.network.neurons.fired[i]);
+            for (l.action_1.lo..l.action_1.hi) |i| count1 += @intFromBool(s.network.neurons.fired[i]);
+        }
+        const chosen: u1 = if (count0 > count1) 0 else if (count1 > count0) 1 else blk: {
+            var arng = rng.derived(seed, .action, @intCast(episode));
+            break :blk @intCast(arng.below(2));
+        };
+        const correct = chosen == l.correctAction(choice);
+        s.applyReward(if (correct) 1.0 else -1.0);
+        s.applyHomeostasis();
+        if (episode >= n_episodes - final_window and correct) correct_in_window += 1;
+    }
+    return @as(f64, @floatFromInt(correct_in_window)) / @as(f64, @floatFromInt(final_window));
+}
+
+test "workspace: ignition competition capacity decay and broadcast are deterministic" {
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .task_enabled = true,
+        .workspace_enabled = true,
+        .workspace_capacity = 1,
+        .workspace_candidate_decay = 0.0,
+        .workspace_ignition_threshold = 0.5,
+        .workspace_state_decay = 0.5,
+        .workspace_feedback_current = 0.4,
+        .workspace_broadcast_current = 0.1,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = task_mod.layout(c);
+
+    // Both candidates ignite, but capacity one plus stable tie-breaking admits A.
+    for (l.input_a.lo..l.input_a.hi) |i| s.network.neurons.fired[i] = true;
+    for (l.input_b.lo..l.input_b.hi) |i| s.network.neurons.fired[i] = true;
+    s.updateWorkspace();
+    try testing.expectEqual(@as(?u1, 0), s.workspace_winner);
+    try testing.expectEqual(@as(f32, 1), s.workspace_state[0]);
+    try testing.expectEqual(@as(f32, 0), s.workspace_state[1]);
+
+    // No candidate crosses ignition: the retained content is not refreshed and
+    // must decay, rather than becoming unrestricted persistent memory.
+    @memset(s.network.neurons.fired, false);
+    s.updateWorkspace();
+    try testing.expectApproxEqAbs(@as(f32, 0.5), s.workspace_state[0], 1e-6);
+    try testing.expectEqual(@as(?u1, 0), s.workspace_winner);
+
+    // B now wins competition and evicts A from the sole capacity slot.
+    for (l.input_b.lo..l.input_b.hi) |i| s.network.neurons.fired[i] = true;
+    s.updateWorkspace();
+    try testing.expectEqual(@as(?u1, 1), s.workspace_winner);
+    try testing.expectEqual(@as(f32, 1), s.workspace_state[1]);
+
+    // The winner's identity feeds its own assembly, while the weak broadcast is
+    // shared with non-input excitatory neurons (including action groups).
+    @memset(s.current, 0);
+    s.injectWorkspaceBroadcast();
+    try testing.expect(s.current[l.input_b.lo] > s.current[l.input_a.lo]);
+    try testing.expectApproxEqAbs(@as(f32, 0.125), s.current[l.action_0.lo], 1e-6);
+}
+
+test "workspace: broadcast causally improves a long delayed association (Phase 7 exit criterion)" {
+    // Same delayed task and seeds in each arm; Phase 4's self-exciting working
+    // memory is OFF. The sole intervention is workspace_enabled, so this is an
+    // actual ablation rather than merely showing that workspace state exists.
+    const seeds = [_]u64{ 1, 2, 3, 4 };
+    var workspace_sum: f64 = 0;
+    var ablated_sum: f64 = 0;
+    for (seeds) |seed| {
+        workspace_sum += try workspaceDelayedAccuracy(testing.allocator, seed, true);
+        ablated_sum += try workspaceDelayedAccuracy(testing.allocator, seed, false);
+    }
+    const denom = @as(f64, @floatFromInt(seeds.len));
+    const workspace_mean = workspace_sum / denom;
+    const ablated_mean = ablated_sum / denom;
+    try testing.expect(workspace_mean >= 0.65);
+    try testing.expect(workspace_mean - ablated_mean >= 0.10);
+}
 
 test "sim: same seed produces identical spike history" {
     const gpa = testing.allocator;

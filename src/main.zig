@@ -7,7 +7,8 @@
 //!    firing, probabilistic synaptic release, delay >= 1 event ring buffer,
 //!    derived-key RNG, raster logging."
 //!
-//! No learning. No growth. No workspace. Not until EXP-001 passes.
+//! Later-phase mechanisms, including the Phase 7 workspace broadcast, remain
+//! opt-in through Config; the built-in default is still the Phase 1 baseline.
 
 const std = @import("std");
 const cfg = @import("config.zig");

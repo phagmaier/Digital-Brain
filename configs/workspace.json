@@ -1,0 +1,17 @@
+{
+  "task_enabled": true,
+  "plasticity_enabled": true,
+  "homeostasis_enabled": true,
+  "homeostasis_per_step": false,
+  "target_rate": 0.05,
+  "homeostasis_lr": 0.05,
+  "task_recurrent_weight": 0.0,
+  "adaptation_enabled": false,
+  "workspace_enabled": true,
+  "workspace_capacity": 1,
+  "workspace_candidate_decay": 0.85,
+  "workspace_ignition_threshold": 0.75,
+  "workspace_state_decay": 0.90,
+  "workspace_feedback_current": 0.45,
+  "workspace_broadcast_current": 0.03
+}

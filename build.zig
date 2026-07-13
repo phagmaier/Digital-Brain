@@ -236,6 +236,26 @@ pub fn build(b: *std.Build) void {
         continual_cmd.addArgs(args);
     }
 
+    // The Phase 7 workspace-broadcast ablation (causal delayed-task criterion).
+    // Invoked with `zig build workspace`.
+    const workspace_exe = b.addExecutable(.{
+        .name = "workspace",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workspace.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(workspace_exe);
+
+    const workspace_step = b.step("workspace", "Run the workspace broadcast ablation -> workspace.csv");
+    const workspace_cmd = b.addRunArtifact(workspace_exe);
+    workspace_step.dependOn(&workspace_cmd.step);
+    workspace_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        workspace_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
