@@ -75,3 +75,8 @@ The tests in `sim.zig` and `net.zig` aren't incidental coverage — they encode 
 
 - This project is written in zig version 0.16.0
 - This is a fairly new version so if you need to know specific zig api calls or standard library functions/structs please use context7
+
+## Additional information if needed
+
+Note that if you are ever confused about terms or about what we are building and the specifications of what we are building there is a very large detailed obsidian note that explains the project and every phase. Note that it is very long and detailed though only query/search inside it when you are confused and need more information. Here is the path to that file: 
+/home/phagmaier/Documents/Obsidian/"Digital Brain Project"/"Brain Inspired Local Learning System.md"
