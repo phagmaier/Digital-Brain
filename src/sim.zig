@@ -123,6 +123,11 @@ pub const Sim = struct {
     rng_firing: rng.Rng,
     rng_release: rng.Rng,
 
+    /// Running reward baseline (DEC-009). Subtracted from reward in applyReward
+    /// so the plastic update is zero-mean once the task is solved. SLOW state:
+    /// it persists across episodes and is NOT reset by resetEpisode.
+    reward_baseline: f32 = 0,
+
     t: u32 = 0,
 
     pub fn init(gpa: Allocator, c: cfg.Config) !Sim {
@@ -156,15 +161,19 @@ pub const Sim = struct {
     /// wrong is the classic way to produce a local-learning result that turns
     /// out to be information leaking between examples.
     ///
-    /// Note what is NOT reset: weights, thresholds, rate EMA, running RNG
-    /// streams. Note what IS: membrane, refractory, event queue, traces.
+    /// Note what is NOT reset: weights, thresholds, rate EMA, reward baseline,
+    /// running RNG streams. Note what IS: membrane, refractory, event queue,
+    /// traces, and eligibility (each episode's credit assignment is independent).
     pub fn resetEpisode(self: *Sim) void {
         const c = self.network.config;
         self.network.neurons.resetFast(c);
         self.queue.clear();
         @memset(self.current, 0);
+        // Eligibility is per-episode fast state: a synapse's tag must not carry
+        // credit from a previous example into this one's reward (DEC-005/DEC-009).
+        @memset(self.network.synapses.eligibility, 0);
         self.t = 0;
-        // RNG streams: continue, never reseed.
+        // RNG streams and reward baseline: continue, never reset.
     }
 
     /// One simulation step. The ORDER here is the spec (§9) and is load-bearing.
@@ -276,7 +285,10 @@ pub const Sim = struct {
             }
         }
 
-        // 8-9. Traces and eligibility -- Phase 3. Deliberately absent.
+        // 8-9. Pre/post traces and eligibility (Phase 3, DEC-009). Deterministic,
+        //      no RNG, stable traversal order -> no reproducibility hazard.
+        if (c.plasticity_enabled) self.updateEligibility();
+
         // 10.  Workspace competition -- Phase 7. Deliberately absent.
 
         // 11. Homeostasis (Phase 2). In the continuous simulator this runs every
@@ -335,6 +347,64 @@ pub const Sim = struct {
                 syn.weight[k] = std.math.clamp(syn.weight[k] * factor, 0.0, c.weight_max);
             }
         }
+    }
+
+    /// Advance the pre/post traces and the per-synapse eligibility one step
+    /// (DEC-009). Called from step() when plasticity is enabled. The eligibility
+    /// update reads the traces as they stood BEFORE this step's spikes, then the
+    /// traces are advanced -- so a synapse is tagged for "pre fired, THEN post
+    /// fired", the causal order this delay>=1 model can represent.
+    fn updateEligibility(self: *Sim) void {
+        const c = self.network.config;
+        const nrn = &self.network.neurons;
+        const syn = &self.network.synapses;
+        const n = nrn.n;
+
+        // Eligibility first, using the pre-this-step traces.
+        for (0..syn.n) |k| {
+            if (!syn.plastic[k]) continue;
+            var e = c.eligibility_decay * syn.eligibility[k];
+            // LTP: post fires now, credit presynaptic activity that led up to it.
+            if (nrn.fired[syn.target[k]]) e += nrn.pre_trace[syn.source[k]];
+            // Optional LTD: pre fires now with a recently-active post -> depress.
+            if (c.ltd_enabled and nrn.fired[syn.source[k]]) e -= nrn.post_trace[syn.target[k]];
+            syn.eligibility[k] = e;
+        }
+
+        // Then advance the traces with this step's spikes.
+        for (0..n) |i| {
+            nrn.pre_trace[i] *= c.pre_trace_decay;
+            nrn.post_trace[i] *= c.post_trace_decay;
+            if (nrn.fired[i]) {
+                nrn.pre_trace[i] += c.trace_increment;
+                nrn.post_trace[i] += c.trace_increment;
+            }
+        }
+    }
+
+    /// Deliver a scalar reward and apply the third factor of the learning rule
+    /// (DEC-009): for every plastic synapse, w += eta * (reward - baseline) * e.
+    /// The baseline (an EMA of reward) makes the update zero-mean as accuracy
+    /// rises, so weights stop drifting once the task is solved. Called once per
+    /// episode by the training driver, at the "Update eligible synapses" step.
+    /// Deterministic; no RNG.
+    pub fn applyReward(self: *Sim, reward: f32) void {
+        const c = self.network.config;
+        if (!c.plasticity_enabled) return;
+        const syn = &self.network.synapses;
+
+        const modulator = reward - self.reward_baseline;
+        for (0..syn.n) |k| {
+            if (!syn.plastic[k]) continue;
+            syn.weight[k] = std.math.clamp(
+                syn.weight[k] + c.learning_rate * modulator * syn.eligibility[k],
+                0.0,
+                c.weight_max_plastic,
+            );
+        }
+
+        self.reward_baseline = c.reward_baseline_decay * self.reward_baseline +
+            (1.0 - c.reward_baseline_decay) * reward;
     }
 };
 
@@ -801,4 +871,164 @@ test "homeostasis: with both homeostats off, weights are unchanged across a run"
 
     for (0..500) |_| _ = s.step(null);
     try testing.expectEqualSlices(f32, before, s.network.synapses.weight);
+}
+
+// ---- Phase 3: local reward learning (the completion checklist, as code) -----
+
+test "plasticity: eligibility tags a co-active synapse and reward moves its weight by the reward sign" {
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 1,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .task_group_size = 8,
+        .background_current = 0.6,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = task.layout(c);
+
+    const ext = try gpa.alloc(f32, c.n_neurons);
+    defer gpa.free(ext);
+    l.fillStimulus(.a, c.task_input_current, ext);
+
+    // Drive stimulus A: input_a fires and drives the action neurons, so the
+    // input->action synapses build up positive eligibility.
+    for (0..40) |_| _ = s.step(ext);
+
+    var max_e: f32 = 0;
+    for (0..s.network.synapses.n) |k| {
+        if (s.network.synapses.plastic[k]) max_e = @max(max_e, s.network.synapses.eligibility[k]);
+    }
+    try testing.expect(max_e > 0); // eligibility actually accumulated
+
+    // Positive reward must not decrease any eligible weight, and must raise at
+    // least one (three-factor rule with a positive modulator).
+    const before = try gpa.dupe(f32, s.network.synapses.weight);
+    defer gpa.free(before);
+    s.applyReward(1.0);
+
+    var increased = false;
+    for (0..s.network.synapses.n) |k| {
+        try testing.expect(s.network.synapses.weight[k] >= 0.0); // w >= 0 invariant
+        if (!s.network.synapses.plastic[k]) {
+            try testing.expectEqual(before[k], s.network.synapses.weight[k]); // non-plastic untouched
+            continue;
+        }
+        if (s.network.synapses.eligibility[k] > 0) {
+            try testing.expect(s.network.synapses.weight[k] >= before[k]);
+            if (s.network.synapses.weight[k] > before[k]) increased = true;
+        }
+    }
+    try testing.expect(increased);
+}
+
+test "plasticity: with plasticity disabled, the task synapses exist but never change" {
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 2,
+        .task_enabled = true,
+        .plasticity_enabled = false, // task present, learning off (the control)
+        .task_group_size = 8,
+        .background_current = 0.6,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = task.layout(c);
+
+    // Nothing is plastic when learning is off.
+    for (0..s.network.synapses.n) |k| try testing.expect(!s.network.synapses.plastic[k]);
+
+    const before = try gpa.dupe(f32, s.network.synapses.weight);
+    defer gpa.free(before);
+
+    const ext = try gpa.alloc(f32, c.n_neurons);
+    defer gpa.free(ext);
+    l.fillStimulus(.a, c.task_input_current, ext);
+    for (0..50) |_| _ = s.step(ext);
+    s.applyReward(1.0); // must be a no-op when plasticity is disabled
+
+    try testing.expectEqualSlices(f32, before, s.network.synapses.weight);
+}
+
+test "learning: the two-choice association is learned above chance across seeds (Phase 3 exit criterion)" {
+    // The exit criterion, as an assertion. Deterministic, so the accuracies are
+    // exact; the bounds sit far below the observed values (min ~0.82, mean ~0.95)
+    // but far above chance (0.5). This is the full episode loop from the doc.
+    const task = @import("task.zig");
+    const gpa = testing.allocator;
+
+    const seeds = [_]u64{ 1, 2, 3, 4 };
+    const n_episodes: u32 = 1200;
+    const stim_steps: u32 = 40;
+    const readout_steps: u32 = 25;
+    const final_window: u32 = 300;
+
+    var sum_acc: f64 = 0;
+    var min_acc: f64 = 1.0;
+
+    for (seeds) |seed| {
+        const c = cfg.Config{
+            .master_seed = seed,
+            .n_neurons = 100,
+            .task_enabled = true,
+            .plasticity_enabled = true,
+            .homeostasis_enabled = true,
+            .homeostasis_per_step = false,
+            .target_rate = 0.05,
+            .homeostasis_lr = 0.05,
+            .task_group_size = 8,
+        };
+        var s = try Sim.init(gpa, c);
+        defer s.deinit(gpa);
+        const l = task.layout(c);
+        const ext = try gpa.alloc(f32, c.n_neurons);
+        defer gpa.free(ext);
+
+        var correct_in_window: u32 = 0;
+        for (0..n_episodes) |ep_usize| {
+            const ep: u32 = @intCast(ep_usize);
+            s.resetEpisode();
+
+            var trng = rng.derived(seed, .task, ep);
+            const choice: task.Choice = if (trng.below(2) == 0) .a else .b;
+            l.fillStimulus(choice, c.task_input_current, ext);
+
+            var count0: u32 = 0;
+            var count1: u32 = 0;
+            for (0..stim_steps) |step| {
+                _ = s.step(ext);
+                if (step >= stim_steps - readout_steps) {
+                    const fired = s.network.neurons.fired;
+                    for (l.action_0.lo..l.action_0.hi) |i| count0 += @intFromBool(fired[i]);
+                    for (l.action_1.lo..l.action_1.hi) |i| count1 += @intFromBool(fired[i]);
+                }
+            }
+
+            var chosen: u1 = undefined;
+            if (count0 > count1) {
+                chosen = 0;
+            } else if (count1 > count0) {
+                chosen = 1;
+            } else {
+                var arng = rng.derived(seed, .action, ep);
+                chosen = @intCast(arng.below(2));
+            }
+
+            const correct = chosen == l.correctAction(choice);
+            s.applyReward(if (correct) 1.0 else -1.0);
+            s.applyHomeostasis();
+
+            if (ep >= n_episodes - final_window and correct) correct_in_window += 1;
+        }
+        const acc = @as(f64, @floatFromInt(correct_in_window)) / @as(f64, @floatFromInt(final_window));
+        sum_acc += acc;
+        min_acc = @min(min_acc, acc);
+    }
+    const mean_acc = sum_acc / @as(f64, @floatFromInt(seeds.len));
+
+    try testing.expect(min_acc > 0.65); // every seed clearly above chance
+    try testing.expect(mean_acc > 0.75);
 }

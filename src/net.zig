@@ -13,6 +13,7 @@
 const std = @import("std");
 const cfg = @import("config.zig");
 const rng = @import("rng.zig");
+const task = @import("task.zig");
 
 const Allocator = std.mem.Allocator;
 const NeuronKind = cfg.NeuronKind;
@@ -195,6 +196,12 @@ pub const Network = struct {
         defer src.deinit(gpa);
         var dst = try std.ArrayList(NeuronId).initCapacity(gpa, n * 8);
         defer dst.deinit(gpa);
+        // Parallel flag: is this a task input->action synapse (plastic, fixed
+        // weight) rather than a random reservoir synapse? Kept alongside src/dst
+        // so the fill loop below can branch without re-deriving group membership.
+        var is_task = try std.ArrayList(bool).initCapacity(gpa, n * 8);
+        defer is_task.deinit(gpa);
+        const task_layout = task.layout(c);
 
         const two_sigma_sq = 2.0 * c.spatial_sigma * c.spatial_sigma;
 
@@ -235,11 +242,28 @@ pub const Network = struct {
                 if (r.float01() < @min(p, 1.0)) {
                     src.appendAssumeCapacity(@intCast(i));
                     dst.appendAssumeCapacity(@intCast(j));
+                    is_task.appendAssumeCapacity(false);
                 }
             }
+
+            // Task edges: emit input->action synapses for this source RIGHT HERE,
+            // while we are on source i, so the combined edge list stays sorted by
+            // source and CSR still falls out with no sort. The action neurons are
+            // the contiguous range [action_0.lo, action_1.hi). No RNG is drawn, so
+            // the random reservoir's stream is identical to a non-task build.
+            if (c.task_enabled and task_layout.isInput(@intCast(i))) {
+                var a: u32 = task_layout.action_0.lo;
+                while (a < task_layout.action_1.hi) : (a += 1) {
+                    try src.append(gpa, @intCast(i));
+                    try dst.append(gpa, a);
+                    try is_task.append(gpa, true);
+                }
+            }
+
             // Grow eagerly rather than assuming capacity forever.
             try src.ensureUnusedCapacity(gpa, n);
             try dst.ensureUnusedCapacity(gpa, n);
+            try is_task.ensureUnusedCapacity(gpa, n);
         }
 
         const m: u32 = @intCast(src.items.len);
@@ -270,17 +294,28 @@ pub const Network = struct {
             syn.source[k] = s;
             syn.target[k] = dst.items[k];
 
-            syn.weight[k] = switch (neurons.kind[s]) {
-                .excitatory => r.range(c.w_exc_init_lo, c.w_exc_init_hi),
-                .inhibitory => r.range(c.w_inh_init_lo, c.w_inh_init_hi),
-            };
-            syn.p_release[k] = c.release_probability;
-            syn.delay[k] = @intCast(c.min_delay + r.below(delay_span));
+            if (is_task.items[k]) {
+                // Task input->action synapse: deterministic and plastic. Draws NO
+                // RNG (see above), fixed shortest delay for an immediate readout.
+                // Source is always excitatory (input groups are the low IDs), so
+                // the effect is excitatory and the weight starts positive.
+                syn.weight[k] = c.task_ia_weight_init;
+                syn.p_release[k] = c.task_ia_p_release;
+                syn.delay[k] = c.min_delay;
+                syn.plastic[k] = c.plasticity_enabled; // learns only when plasticity is on
+            } else {
+                syn.weight[k] = switch (neurons.kind[s]) {
+                    .excitatory => r.range(c.w_exc_init_lo, c.w_exc_init_hi),
+                    .inhibitory => r.range(c.w_inh_init_lo, c.w_inh_init_hi),
+                };
+                syn.p_release[k] = c.release_probability;
+                syn.delay[k] = @intCast(c.min_delay + r.below(delay_span));
+                syn.plastic[k] = false; // the random reservoir is fixed; only task edges learn
+            }
 
             syn.eligibility[k] = 0;
             syn.permanence[k] = 0.5;
             syn.age[k] = 0;
-            syn.plastic[k] = false; // Phase 1: nothing learns. DEC-006 governs later.
             syn.alive[k] = true;
 
             // THE INVARIANTS. Assert them at the point of construction, not in
@@ -393,4 +428,59 @@ test "net: spatial bias produces shorter edges than a uniform graph" {
     }.f;
 
     try testing.expect(meanLen(local) < meanLen(uniform) * 0.75);
+}
+
+test "net: task build adds all-to-all plastic input->action synapses (Phase 3)" {
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 5,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .task_group_size = 8,
+    };
+    var net = try Network.build(gpa, c);
+    defer net.deinit(gpa);
+    const l = task.layout(c);
+
+    var n_plastic: u32 = 0;
+    for (0..net.synapses.n) |k| {
+        if (!net.synapses.plastic[k]) continue;
+        n_plastic += 1;
+        // Every plastic synapse is an input->action edge from an excitatory source.
+        try testing.expect(l.isInput(net.synapses.source[k]));
+        try testing.expect(l.isAction(net.synapses.target[k]));
+        try testing.expect(net.neurons.kind[net.synapses.source[k]] == .excitatory);
+        try testing.expectEqual(c.task_ia_weight_init, net.synapses.weight[k]);
+    }
+    // All-to-all across the two input groups x two action groups: (2g)x(2g).
+    const g = c.task_group_size;
+    try testing.expectEqual(4 * g * g, n_plastic);
+}
+
+test "net: enabling the task does not perturb the random reservoir's RNG stream" {
+    // The task synapses draw no RNG, so every reservoir synapse a plain build
+    // produces must appear identically in the task build (task edges are extra).
+    // This keeps the Phase 1/2 reservoir reproducible under Phase 3.
+    const gpa = testing.allocator;
+    const seed: u64 = 77;
+    var plain = try Network.build(gpa, .{ .master_seed = seed });
+    defer plain.deinit(gpa);
+    var withtask = try Network.build(gpa, .{ .master_seed = seed, .task_enabled = true, .plasticity_enabled = true });
+    defer withtask.deinit(gpa);
+
+    // The task build has strictly more synapses (the added input->action edges).
+    try testing.expect(withtask.synapses.n > plain.synapses.n);
+
+    // Every reservoir edge (non-plastic) of the task build, in order, matches the
+    // plain build edge for edge -- same source, target, weight, delay.
+    var pk: usize = 0;
+    for (0..withtask.synapses.n) |k| {
+        if (withtask.synapses.plastic[k]) continue; // skip the task edges
+        try testing.expectEqual(plain.synapses.source[pk], withtask.synapses.source[k]);
+        try testing.expectEqual(plain.synapses.target[pk], withtask.synapses.target[k]);
+        try testing.expectEqual(plain.synapses.weight[pk], withtask.synapses.weight[k]);
+        try testing.expectEqual(plain.synapses.delay[pk], withtask.synapses.delay[k]);
+        pk += 1;
+    }
+    try testing.expectEqual(plain.synapses.n, @as(u32, @intCast(pk)));
 }

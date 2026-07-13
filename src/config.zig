@@ -148,6 +148,47 @@ pub const Config = struct {
     /// Upper clamp for scaled weights. w >= 0 still holds (sign is the neuron's).
     weight_max: f32 = 8.0,
 
+    // -- plasticity (Phase 3, DEC-009: three-factor reward-modulated Hebb) ---
+    // The learning rule is three-factor: pre x post (Hebbian coincidence,
+    // captured in an eligibility trace) x reward (a global scalar delivered at
+    // the end of an episode). The eligibility trace is what bridges the gap
+    // between the coincidence and the later reward -- it "tags" recently active
+    // synapses so a reward can find them (Izhikevich 2007).
+    //   pre_i (decays, bumped on i's spike), post_j (decays, bumped on j's spike)
+    //   e_ij(t) = lambda_e * e_ij + [post spike now] * pre_i   (LTP; LTD optional)
+    //   on reward R:  w_ij += eta_w * (R - baseline) * e_ij
+    // Only synapses with plastic[k] = true are touched; in the task those are the
+    // input->action synapses (see net.zig). Deterministic, no RNG.
+    plasticity_enabled: bool = false,
+    pre_trace_decay: f32 = 0.9, // lambda_pre
+    post_trace_decay: f32 = 0.9, // lambda_post
+    trace_increment: f32 = 1.0, // bump added to a trace on a spike
+    eligibility_decay: f32 = 0.9, // lambda_e
+    /// Enable the anti-Hebbian LTD term (post-before-pre depresses). Off by
+    /// default: LTP-only reward modulation is more robust for the association task.
+    ltd_enabled: bool = false,
+    learning_rate: f32 = 0.05, // eta_w
+    /// Reward baseline EMA decay. Subtracting a running reward baseline makes the
+    /// update zero-mean as accuracy rises, which stops the plastic weights from
+    /// drifting/saturating once the task is solved. This is the REINFORCE-with-
+    /// baseline trick; it materially improves cross-seed reliability.
+    reward_baseline_decay: f32 = 0.98,
+    weight_max_plastic: f32 = 4.0, // clamp for plastic weights (w >= 0 still holds)
+
+    // -- task: immediate two-choice association (Phase 3, DEC-008) ----------
+    // Four disjoint groups are carved from the low excitatory IDs: input_a,
+    // input_b, action_0, action_1 (task_group_size neurons each; see task.zig).
+    // Stimulus A drives input_a, B drives input_b. The correct mapping is
+    // A->action_0, B->action_1. When task_enabled, net.zig adds all-to-all
+    // PLASTIC input->action synapses (a trainable readout on top of the fixed
+    // random reservoir); reward learning sculpts input_a->action_0 up and
+    // input_a->action_1 down (and symmetrically for B).
+    task_enabled: bool = false,
+    task_group_size: u32 = 8,
+    task_input_current: f32 = 1.5, // stimulus drive into the active input group
+    task_ia_weight_init: f32 = 0.2, // initial (symmetric) input->action weight
+    task_ia_p_release: f32 = 1.0, // reliable readout pathway
+
     // -- run --------------------------------------------------------------
     steps: u32 = 2000,
 
@@ -182,6 +223,24 @@ pub const Config = struct {
             return error.BadThresholdRange;
         if (self.weight_max < self.w_exc_init_hi)
             return error.WeightMaxBelowInit;
+
+        // Phase 3 plasticity/task knobs.
+        if (self.eligibility_decay < 0.0 or self.eligibility_decay >= 1.0)
+            return error.BadEligibilityDecay;
+        if (self.task_ia_p_release < 0.0 or self.task_ia_p_release > 1.0)
+            return error.BadTaskReleaseProbability;
+        if (self.task_enabled) {
+            // The four task groups are carved from the excitatory population and
+            // must fit inside it.
+            const n_exc: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(self.n_neurons)) * self.excitatory_fraction));
+            if (self.task_group_size == 0) return error.EmptyTaskGroup;
+            if (4 * self.task_group_size > n_exc) return error.TaskGroupsExceedExcitatory;
+        }
+    }
+
+    /// Number of excitatory neurons, by the same deterministic rule net.zig uses.
+    pub fn nExcitatory(self: Config) u32 {
+        return @intFromFloat(@round(@as(f32, @floatFromInt(self.n_neurons)) * self.excitatory_fraction));
     }
 
     /// Load a Config from a JSON file. Accepts EITHER a bare Config object or a

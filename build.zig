@@ -156,6 +156,26 @@ pub fn build(b: *std.Build) void {
         perturb_cmd.addArgs(args);
     }
 
+    // The Phase 3 training experiment (reward-learning exit criterion).
+    // Invoked with `zig build train`.
+    const train_exe = b.addExecutable(.{
+        .name = "train",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/train.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(train_exe);
+
+    const train_step = b.step("train", "Run the two-choice association training experiment -> train.csv");
+    const train_cmd = b.addRunArtifact(train_exe);
+    train_step.dependOn(&train_cmd.step);
+    train_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        train_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
