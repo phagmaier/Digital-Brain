@@ -16,6 +16,7 @@ const std = @import("std");
 const cfg = @import("config.zig");
 const sim = @import("sim.zig");
 const log = @import("log.zig");
+const provenance = @import("provenance.zig");
 
 // ---- the grid -------------------------------------------------------------
 // Kept as plain arrays so the sweep is obvious and diffable. The Cartesian
@@ -76,6 +77,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try writeAtomic(io, "sweep.csv", out.written());
+    try provenance.write(io, gpa, "sweep.meta.json", "parameter_sweep", .{
+        .seeds = seeds,
+        .background_currents = background_currents,
+        .w_inh_los = w_inh_los,
+        .steps = steps,
+        .base_config = cfg.Config{},
+    });
 
     try stdout.interface.print("swept {d} configs -> sweep.csv\n", .{n_runs});
     try stdout.interface.flush();

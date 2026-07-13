@@ -27,6 +27,18 @@ pub const ResetRule = enum {
     hard,
 };
 
+fn isProbability(value: f32) bool {
+    return value >= 0.0 and value <= 1.0;
+}
+
+fn isDecay(value: f32) bool {
+    return value >= 0.0 and value < 1.0;
+}
+
+fn isNonNegative(value: f32) bool {
+    return value >= 0.0;
+}
+
 pub const Config = struct {
     // -- reproducibility --------------------------------------------------
     master_seed: u64 = 0xC0FFEE,
@@ -363,41 +375,74 @@ pub const Config = struct {
 
     /// Validate the invariants that must hold before a single step is taken.
     pub fn validate(self: Config) !void {
+        // NaN silently makes ordinary comparisons false, while infinities can
+        // poison dynamics and serialized provenance. Reject every float through
+        // one centralized gate before applying field-specific domains below.
+        inline for (std.meta.fields(Config)) |field| {
+            if (comptime field.type == f32) {
+                if (!std.math.isFinite(@field(self, field.name)))
+                    return error.NonFiniteParameter;
+            }
+        }
+
         // DEC-001. This is the one that will silently corrupt a run if violated.
         if (self.min_delay < 1) return error.ZeroDelayForbidden;
         if (self.max_delay < self.min_delay) return error.BadDelayRange;
 
         if (self.n_neurons == 0) return error.NoNeurons;
-        if (self.excitatory_fraction < 0.0 or self.excitatory_fraction > 1.0)
+        if (!isProbability(self.excitatory_fraction))
             return error.BadExcitatoryFraction;
-        if (self.membrane_leak < 0.0 or self.membrane_leak > 1.0)
+        if (!isProbability(self.membrane_leak))
             return error.BadLeak;
-        if (self.release_probability < 0.0 or self.release_probability > 1.0)
+        if (!isProbability(self.release_probability))
             return error.BadReleaseProbability;
         if (self.connection_density <= 0.0 or self.connection_density > 1.0)
             return error.BadDensity;
+        if (!self.uniform_graph and self.spatial_sigma <= 0.0)
+            return error.BadSpatialSigma;
+        if (!isNonNegative(self.reset_decrement) or self.beta < 0.0)
+            return error.BadMembraneParameter;
+        if (!isDecay(self.adaptation_decay) or !isNonNegative(self.adaptation_increment))
+            return error.BadAdaptationParameter;
 
         // w >= 0 always. Sign lives in the neuron type.
-        if (self.w_exc_init_lo < 0.0 or self.w_inh_init_lo < 0.0)
+        if (!isNonNegative(self.w_exc_init_lo) or !isNonNegative(self.w_inh_init_lo))
             return error.NegativeWeight;
         if (self.w_exc_init_hi < self.w_exc_init_lo or self.w_inh_init_hi < self.w_inh_init_lo)
             return error.BadWeightRange;
 
         // Phase 2 homeostasis knobs.
-        if (self.rate_ema_decay < 0.0 or self.rate_ema_decay >= 1.0)
+        if (!isDecay(self.rate_ema_decay))
             return error.BadRateEmaDecay;
-        if (self.target_rate < 0.0 or self.target_rate > 1.0)
+        if (!isProbability(self.target_rate))
             return error.BadTargetRate;
-        if (self.threshold_max < self.threshold_min)
+        if (!isNonNegative(self.homeostasis_lr) or !isNonNegative(self.weight_norm_lr))
+            return error.BadHomeostasisLearningRate;
+        if (!isNonNegative(self.threshold_min) or self.threshold_max < self.threshold_min)
             return error.BadThresholdRange;
+        if (self.homeostasis_enabled and (self.threshold < self.threshold_min or self.threshold > self.threshold_max))
+            return error.InitialThresholdOutsideHomeostaticRange;
+        // DEC-007 scales excitatory inputs only, so this clamp need not cover
+        // intentionally strong inhibitory weights used by E/I ablations.
         if (self.weight_max < self.w_exc_init_hi)
             return error.WeightMaxBelowInit;
 
         // Phase 3 plasticity/task knobs.
-        if (self.eligibility_decay < 0.0 or self.eligibility_decay >= 1.0)
+        if (!isDecay(self.pre_trace_decay) or !isDecay(self.post_trace_decay) or
+            !isDecay(self.eligibility_decay) or !isDecay(self.reward_baseline_decay))
             return error.BadEligibilityDecay;
-        if (self.task_ia_p_release < 0.0 or self.task_ia_p_release > 1.0)
+        if (!isNonNegative(self.trace_increment) or !isNonNegative(self.learning_rate))
+            return error.BadPlasticityLearningRate;
+        if (!isNonNegative(self.weight_max_plastic)) return error.NegativeWeight;
+        if (!isProbability(self.task_ia_p_release))
             return error.BadTaskReleaseProbability;
+        if (!isNonNegative(self.task_input_current) or !isNonNegative(self.task_ia_weight_init) or
+            !isNonNegative(self.task_recurrent_weight))
+            return error.NegativeTaskCurrentOrWeight;
+        if (self.task_enabled and self.weight_max_plastic < self.task_ia_weight_init)
+            return error.PlasticWeightMaxBelowInit;
+        if (self.task_enabled and self.arithmetic_enabled)
+            return error.OverlappingTaskLayouts;
         if (self.task_enabled) {
             // The four task groups are carved from the excitatory population and
             // must fit inside it.
@@ -414,13 +459,15 @@ pub const Config = struct {
             if (self.arithmetic_group_size == 0) return error.EmptyArithmeticGroup;
             if (self.arithmetic_max_operand == 0 or self.arithmetic_max_operand > 32)
                 return error.BadArithmeticOperandRange;
-            if (self.arithmetic_readout_p_release < 0.0 or self.arithmetic_readout_p_release > 1.0)
+            if (!isProbability(self.arithmetic_readout_p_release))
                 return error.BadArithmeticReleaseProbability;
             if (self.arithmetic_symbol_steps == 0 or self.arithmetic_readout_steps == 0)
                 return error.ZeroArithmeticWindow;
-            if (self.arithmetic_input_current < 0.0 or self.arithmetic_answer_probe_current < 0.0 or
-                self.arithmetic_readout_weight_init < 0.0)
+            if (!isNonNegative(self.arithmetic_input_current) or !isNonNegative(self.arithmetic_answer_probe_current) or
+                !isNonNegative(self.arithmetic_readout_weight_init))
                 return error.NegativeArithmeticCurrentOrWeight;
+            if (self.weight_max_plastic < self.arithmetic_readout_weight_init)
+                return error.PlasticWeightMaxBelowInit;
             const max_operand: u32 = self.arithmetic_max_operand;
             const symbol_groups = 4 + 2 * (max_operand + 1); // START/END/+/- + operands
             const action_groups = 2 * max_operand + 1;
@@ -446,13 +493,19 @@ pub const Config = struct {
             if (self.max_out_degree == 0) return error.ZeroConnectionBudget;
             if (self.target_out_degree > self.max_out_degree)
                 return error.TargetDegreeExceedsBudget;
-            if (self.prune_permanence_min < 0.0 or self.prune_permanence_min > 1.0)
+            if (!isProbability(self.prune_permanence_min))
                 return error.BadPrunePermanence;
-            if (self.grow_permanence_init < 0.0 or self.grow_permanence_init > 1.0)
+            if (!isProbability(self.grow_permanence_init))
                 return error.BadGrowPermanence;
-            if (self.growth_probability < 0.0 or self.growth_probability > 1.0)
+            if (!isProbability(self.growth_probability))
                 return error.BadGrowthProbability;
-            if (self.grow_weight_init < 0.0) return error.NegativeWeight;
+            if (!isNonNegative(self.permanence_activity_lr) or
+                !isProbability(self.permanence_disuse_decay) or self.coactivity_max <= 0.0 or
+                !isProbability(self.weight_permanence_decay))
+                return error.BadStructuralCoefficient;
+            if (!isNonNegative(self.prune_weight_min) or !isNonNegative(self.grow_weight_init))
+                return error.NegativeWeight;
+            if (!isNonNegative(self.growth_sigma)) return error.BadGrowthSigma;
             // A tentative synapse must not be born already prunable, or it would
             // be deleted the moment its grace period expires with no chance to
             // consolidate -- defeating the point of growth.
@@ -465,7 +518,10 @@ pub const Config = struct {
         if (self.consolidation_enabled) {
             if (!self.structural_plasticity_enabled)
                 return error.ConsolidationNeedsStructuralPlasticity;
-            if (self.consolidation_lr < 0.0) return error.BadConsolidationLr;
+            if (!self.plasticity_enabled) return error.ConsolidationNeedsPlasticity;
+            if (!self.task_enabled and !self.arithmetic_enabled)
+                return error.ConsolidationNeedsPlasticTask;
+            if (!isNonNegative(self.consolidation_lr)) return error.BadConsolidationLr;
         }
 
         // Phase 7's candidate assemblies are the two task input groups. Keeping
@@ -474,15 +530,16 @@ pub const Config = struct {
             if (!self.task_enabled) return error.WorkspaceNeedsTask;
             if (self.workspace_capacity == 0 or self.workspace_capacity > 2)
                 return error.BadWorkspaceCapacity;
-            if (self.workspace_candidate_decay < 0.0 or self.workspace_candidate_decay >= 1.0)
+            if (!isDecay(self.workspace_candidate_decay))
                 return error.BadWorkspaceCandidateDecay;
-            if (self.workspace_state_decay < 0.0 or self.workspace_state_decay >= 1.0)
+            if (!isDecay(self.workspace_state_decay))
                 return error.BadWorkspaceStateDecay;
             if (self.workspace_ignition_threshold <= 0.0)
                 return error.BadWorkspaceIgnitionThreshold;
-            if (self.workspace_feedback_current < 0.0 or self.workspace_broadcast_current < 0.0)
+            if (!isNonNegative(self.workspace_feedback_current) or !isNonNegative(self.workspace_broadcast_current))
                 return error.NegativeWorkspaceCurrent;
         }
+        if (self.steps == 0) return error.ZeroRunLength;
     }
 
     /// Number of excitatory neurons, by the same deterministic rule net.zig uses.
@@ -538,6 +595,33 @@ pub const RunMetadata = struct {
 test "config: default passes validation" {
     const c = Config{};
     try c.validate();
+}
+
+test "config: invalid numeric and mechanism combinations are rejected" {
+    const Case = struct {
+        config: Config,
+        expected: anyerror,
+    };
+    const cases = [_]Case{
+        .{ .config = .{ .background_current = std.math.nan(f32) }, .expected = error.NonFiniteParameter },
+        .{ .config = .{ .spatial_sigma = 0.0 }, .expected = error.BadSpatialSigma },
+        .{ .config = .{ .task_ia_weight_init = -0.1 }, .expected = error.NegativeTaskCurrentOrWeight },
+        .{ .config = .{ .task_recurrent_weight = -0.1 }, .expected = error.NegativeTaskCurrentOrWeight },
+        .{ .config = .{ .pre_trace_decay = 1.0 }, .expected = error.BadEligibilityDecay },
+        .{ .config = .{ .reward_baseline_decay = -0.1 }, .expected = error.BadEligibilityDecay },
+        .{ .config = .{ .learning_rate = -0.1 }, .expected = error.BadPlasticityLearningRate },
+        .{ .config = .{ .adaptation_decay = 1.0 }, .expected = error.BadAdaptationParameter },
+        .{ .config = .{ .structural_plasticity_enabled = true, .weight_permanence_decay = 1.1 }, .expected = error.BadStructuralCoefficient },
+        .{ .config = .{ .task_enabled = true, .arithmetic_enabled = true }, .expected = error.OverlappingTaskLayouts },
+        .{ .config = .{ .structural_plasticity_enabled = true, .consolidation_enabled = true, .task_enabled = true }, .expected = error.ConsolidationNeedsPlasticity },
+        .{ .config = .{ .structural_plasticity_enabled = true, .consolidation_enabled = true, .plasticity_enabled = true }, .expected = error.ConsolidationNeedsPlasticTask },
+        .{ .config = .{ .steps = 0 }, .expected = error.ZeroRunLength },
+    };
+
+    for (cases) |case| try std.testing.expectError(case.expected, case.config.validate());
+
+    // A zero spatial sigma is irrelevant and therefore legal for a uniform graph.
+    try (Config{ .uniform_graph = true, .spatial_sigma = 0.0 }).validate();
 }
 
 test "config: zero delay is rejected (DEC-001)" {

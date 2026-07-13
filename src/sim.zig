@@ -1968,7 +1968,11 @@ test "consolidation: requires structural plasticity (validation)" {
     var c = cfg.Config{ .consolidation_enabled = true, .structural_plasticity_enabled = false };
     try testing.expectError(error.ConsolidationNeedsStructuralPlasticity, c.validate());
     c.structural_plasticity_enabled = true;
-    try c.validate(); // now legal
+    try testing.expectError(error.ConsolidationNeedsPlasticity, c.validate());
+    c.plasticity_enabled = true;
+    try testing.expectError(error.ConsolidationNeedsPlasticTask, c.validate());
+    c.task_enabled = true;
+    try c.validate(); // the slow clock, learning rule, and plastic task are present
 }
 
 test "learning: consolidated pathways survive disuse better than tentative ones (Phase 6 exit criterion)" {

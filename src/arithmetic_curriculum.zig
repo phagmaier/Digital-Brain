@@ -22,6 +22,7 @@ const sim = @import("sim.zig");
 const arithmetic = @import("arithmetic.zig");
 const rng = @import("rng.zig");
 const termination = @import("termination.zig");
+const provenance = @import("provenance.zig");
 
 const seeds = [_]u64{ 1, 2, 3, 4 };
 const increment_episodes: u32 = 700;
@@ -385,6 +386,19 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     try writeAtomic(io, "arithmetic.csv", csv.written());
+    try provenance.write(io, gpa, "arithmetic.meta.json", "arithmetic_curriculum", .{
+        .seeds = seeds,
+        .config_template = baseConfig(seeds[0]),
+        .increment_episodes = increment_episodes,
+        .arithmetic_episodes = arithmetic_episodes,
+        .eval_repeats = eval_repeats,
+        .pass_accuracy = pass_accuracy,
+        .pass_gain_over_lookup = pass_gain_over_lookup,
+        .curriculum_teacher_current = curriculum_teacher_current,
+        .transition_action_current = transition_action_current,
+        .transition_competition_current = transition_competition_current,
+        .transition_termination_vote = transition_termination_vote,
+    });
 
     const denom = @as(f64, @floatFromInt(seeds.len));
     const train_mean = train_sum / denom;

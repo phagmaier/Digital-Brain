@@ -32,6 +32,7 @@ const cfg = @import("config.zig");
 const sim = @import("sim.zig");
 const task = @import("task.zig");
 const rng = @import("rng.zig");
+const provenance = @import("provenance.zig");
 
 const seeds = [_]u64{ 1, 2, 3, 4 };
 const n_episodes: u32 = 1500;
@@ -157,6 +158,19 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     try writeAtomic(io, "delay.csv", out.written());
+    try provenance.write(io, gpa, "delay.meta.json", "delayed_association", .{
+        .seeds = seeds,
+        .config_template = baseConfig(seeds[0], memory_weight),
+        .conditions = conditions,
+        .delays = delays,
+        .n_episodes = n_episodes,
+        .stim_steps = stim_steps,
+        .readout_steps = readout_steps,
+        .final_window = final_window,
+        .target_delay = target_delay,
+        .pass_mean = pass_mean,
+        .pass_min = pass_min,
+    });
 
     // ---- recurrent-state analysis --------------------------------------
     try analyzeRetention(gpa, io, seeds[0]);
@@ -175,8 +189,10 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{
         target_delay,
-        target_mean,  pass_mean,
-        target_min,   pass_min,
+        target_mean,
+        pass_mean,
+        target_min,
+        pass_min,
         if (pass) "PASS -- retains the stimulus across the delay, above chance." else "FAIL -- see accuracy vs delay above.",
     });
     try o.flush();

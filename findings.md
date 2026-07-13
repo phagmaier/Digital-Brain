@@ -8,6 +8,30 @@ here is reproducible (same seed → same numbers).
 
 ---
 
+## Stage 0 hardening — v1 freeze
+
+**The bounded integer sampler changed intentionally.** The original rejection
+limit accepted a domain whose size was generally not divisible by the requested
+bound. The practical bias was negligible at `u64` scale, but the implementation
+did not satisfy its stated invariant. `Rng.below()` now rejects exactly
+`2^64 mod n` words, an exhaustive `u8` reference test proves equal residue
+counts for every possible bound, and `prng_impl_version` is now 2 (DEC-004).
+
+**Reproducibility is now guarded both within and across versions.** The repeated-
+run determinism check includes `run_meta.json`; `scripts/check-golden.sh` compares
+all default artefacts and the human-readable summary against a committed golden.
+Every experiment harness also emits a `*.meta.json` protocol sidecar with its
+seeds, config templates, thresholds, PRNG version, and Zig version.
+
+**Configuration and allocator failures now fail closed.** Validation rejects
+non-finite floats centrally, negative task weights/currents and learning rates,
+invalid decay/structural coefficients, overlapping task/arithmetic layouts, and
+consolidation without both reward plasticity and a plastic task. Multi-allocation
+network initializers clean up every partial construction; exhaustive failing-
+allocator tests cover the full `Network.build()` path.
+
+---
+
 ## Phase 1 — fixed recurrent spiking
 
 **The default network runs "warm," ~0.14 spikes/neuron/step.** Alive and sparse

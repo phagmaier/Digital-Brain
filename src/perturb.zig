@@ -22,6 +22,7 @@
 const std = @import("std");
 const cfg = @import("config.zig");
 const sim = @import("sim.zig");
+const provenance = @import("provenance.zig");
 
 const settle_steps: u32 = 4000;
 const perturb_steps: u32 = 4000;
@@ -57,9 +58,13 @@ const Trace = struct {
     thresh: []f32, // mean_threshold per step
 
     fn init(gpa: std.mem.Allocator) !Trace {
+        const rate = try gpa.alloc(f32, total_steps);
+        errdefer gpa.free(rate);
+        const thresh = try gpa.alloc(f32, total_steps);
+        errdefer gpa.free(thresh);
         return .{
-            .rate = try gpa.alloc(f32, total_steps),
-            .thresh = try gpa.alloc(f32, total_steps),
+            .rate = rate,
+            .thresh = thresh,
         };
     }
     fn deinit(self: *Trace, gpa: std.mem.Allocator) void {
@@ -112,6 +117,15 @@ pub fn main(init: std.process.Init) !void {
         });
     }
     try writeAtomic(io, "perturb.csv", out.written());
+    try provenance.write(io, gpa, "perturb.meta.json", "homeostasis_perturbation", .{
+        .base_config = baseConfig(),
+        .conditions = [_][]const u8{ "homeostasis_on", "homeostasis_off" },
+        .settle_steps = settle_steps,
+        .perturb_steps = perturb_steps,
+        .perturb_current = perturb_current,
+        .band_lo_frac = band_lo_frac,
+        .band_hi_frac = band_hi_frac,
+    });
 
     // ---- verdict --------------------------------------------------------
     const c = baseConfig();
@@ -147,13 +161,13 @@ pub fn main(init: std.process.Init) !void {
         \\  final rate  (OFF)  {d:.4}   {s}
         \\
     , .{
-        c.target_rate,          band_lo,
-        band_hi,                perturb_current,
-        settle_steps,           total_steps,
-        settle_tail,            checkStr(converged, "converged to band", "did NOT converge"),
-        on_peak,                checkStr(perturbed_out, "left band under drive", "perturbation too weak"),
-        on_final,               checkStr(recovered, "returned to band", "did NOT recover"),
-        off_final,              checkStr(control_stays_out, "stayed above band (as expected)", "control did not stay out -- test is not isolating homeostasis"),
+        c.target_rate, band_lo,
+        band_hi,       perturb_current,
+        settle_steps,  total_steps,
+        settle_tail,   checkStr(converged, "converged to band", "did NOT converge"),
+        on_peak,       checkStr(perturbed_out, "left band under drive", "perturbation too weak"),
+        on_final,      checkStr(recovered, "returned to band", "did NOT recover"),
+        off_final,     checkStr(control_stays_out, "stayed above band (as expected)", "control did not stay out -- test is not isolating homeostasis"),
     });
     try o.print("  VERDICT: {s}\n\n", .{if (pass) "PASS -- homeostasis regulates back to target." else "FAIL -- see failing line(s) above."});
     try o.print("  wrote perturb.csv\n\n", .{});

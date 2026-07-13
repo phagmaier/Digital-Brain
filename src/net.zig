@@ -53,19 +53,42 @@ pub const Neurons = struct {
     pub fn init(gpa: Allocator, c: cfg.Config, r: *rng.Rng) !Neurons {
         const n = c.n_neurons;
 
+        const u = try gpa.alloc(f32, n);
+        errdefer gpa.free(u);
+        const threshold = try gpa.alloc(f32, n);
+        errdefer gpa.free(threshold);
+        const adaptation = try gpa.alloc(f32, n);
+        errdefer gpa.free(adaptation);
+        const rate_ema = try gpa.alloc(f32, n);
+        errdefer gpa.free(rate_ema);
+        const refractory = try gpa.alloc(u16, n);
+        errdefer gpa.free(refractory);
+        const fired = try gpa.alloc(bool, n);
+        errdefer gpa.free(fired);
+        const kind = try gpa.alloc(NeuronKind, n);
+        errdefer gpa.free(kind);
+        const pos_x = try gpa.alloc(f32, n);
+        errdefer gpa.free(pos_x);
+        const pos_y = try gpa.alloc(f32, n);
+        errdefer gpa.free(pos_y);
+        const pre_trace = try gpa.alloc(f32, n);
+        errdefer gpa.free(pre_trace);
+        const post_trace = try gpa.alloc(f32, n);
+        errdefer gpa.free(post_trace);
+
         var self: Neurons = .{
             .n = n,
-            .u = try gpa.alloc(f32, n),
-            .threshold = try gpa.alloc(f32, n),
-            .adaptation = try gpa.alloc(f32, n),
-            .rate_ema = try gpa.alloc(f32, n),
-            .refractory = try gpa.alloc(u16, n),
-            .fired = try gpa.alloc(bool, n),
-            .kind = try gpa.alloc(NeuronKind, n),
-            .pos_x = try gpa.alloc(f32, n),
-            .pos_y = try gpa.alloc(f32, n),
-            .pre_trace = try gpa.alloc(f32, n),
-            .post_trace = try gpa.alloc(f32, n),
+            .u = u,
+            .threshold = threshold,
+            .adaptation = adaptation,
+            .rate_ema = rate_ema,
+            .refractory = refractory,
+            .fired = fired,
+            .kind = kind,
+            .pos_x = pos_x,
+            .pos_y = pos_y,
+            .pre_trace = pre_trace,
+            .post_trace = post_trace,
         };
 
         // Excitatory neurons take the low IDs, inhibitory the high ones.
@@ -155,6 +178,49 @@ pub const Synapses = struct {
 
     /// CSR outgoing ranges: neuron i owns synapses [out_start[i], out_start[i+1]).
     out_start: []u32,
+
+    fn init(gpa: Allocator, n_synapses: u32, n_neurons: u32) !Synapses {
+        const source = try gpa.alloc(NeuronId, n_synapses);
+        errdefer gpa.free(source);
+        const target = try gpa.alloc(NeuronId, n_synapses);
+        errdefer gpa.free(target);
+        const weight = try gpa.alloc(f32, n_synapses);
+        errdefer gpa.free(weight);
+        const p_release = try gpa.alloc(f32, n_synapses);
+        errdefer gpa.free(p_release);
+        const delay = try gpa.alloc(u16, n_synapses);
+        errdefer gpa.free(delay);
+        const eligibility = try gpa.alloc(f32, n_synapses);
+        errdefer gpa.free(eligibility);
+        const permanence = try gpa.alloc(f32, n_synapses);
+        errdefer gpa.free(permanence);
+        const age = try gpa.alloc(u32, n_synapses);
+        errdefer gpa.free(age);
+        const structural = try gpa.alloc(bool, n_synapses);
+        errdefer gpa.free(structural);
+        const plastic = try gpa.alloc(bool, n_synapses);
+        errdefer gpa.free(plastic);
+        const alive = try gpa.alloc(bool, n_synapses);
+        errdefer gpa.free(alive);
+        const out_start = try gpa.alloc(u32, n_neurons + 1);
+        errdefer gpa.free(out_start);
+
+        return .{
+            .n = n_synapses,
+            .source = source,
+            .target = target,
+            .weight = weight,
+            .p_release = p_release,
+            .delay = delay,
+            .eligibility = eligibility,
+            .permanence = permanence,
+            .age = age,
+            .structural = structural,
+            .plastic = plastic,
+            .alive = alive,
+            .out_start = out_start,
+        };
+    }
 
     pub fn deinit(self: *Synapses, gpa: Allocator) void {
         gpa.free(self.source);
@@ -338,21 +404,7 @@ pub const Network = struct {
             total += cap;
         }
 
-        var syn: Synapses = .{
-            .n = total,
-            .source = try gpa.alloc(NeuronId, total),
-            .target = try gpa.alloc(NeuronId, total),
-            .weight = try gpa.alloc(f32, total),
-            .p_release = try gpa.alloc(f32, total),
-            .delay = try gpa.alloc(u16, total),
-            .eligibility = try gpa.alloc(f32, total),
-            .permanence = try gpa.alloc(f32, total),
-            .age = try gpa.alloc(u32, total),
-            .structural = try gpa.alloc(bool, total),
-            .plastic = try gpa.alloc(bool, total),
-            .alive = try gpa.alloc(bool, total),
-            .out_start = try gpa.alloc(u32, n + 1),
-        };
+        var syn = try Synapses.init(gpa, total, n);
         errdefer syn.deinit(gpa);
 
         const delay_span: u64 = @as(u64, c.max_delay) - @as(u64, c.min_delay) + 1;
@@ -463,6 +515,15 @@ pub const Network = struct {
 // ===========================================================================
 
 const testing = std.testing;
+
+fn buildAndDestroy(gpa: Allocator) !void {
+    var net = try Network.build(gpa, .{});
+    net.deinit(gpa);
+}
+
+test "net: every allocation failure is cleaned up" {
+    try testing.checkAllAllocationFailures(testing.allocator, buildAndDestroy, .{});
+}
 
 test "net: builds and satisfies invariants" {
     const gpa = testing.allocator;

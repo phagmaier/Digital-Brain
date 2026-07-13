@@ -5,3 +5,4 @@ zig-out/
 *.csv
 *.png
 run_meta.json
+*.meta.json

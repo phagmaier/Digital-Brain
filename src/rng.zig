@@ -22,7 +22,7 @@ const std = @import("std");
 
 /// Bump this if the algorithm below is ever changed. It goes in run metadata.
 pub const prng_algorithm = "xoshiro256++";
-pub const prng_impl_version = 1;
+pub const prng_impl_version = 2;
 
 // ---------------------------------------------------------------------------
 // splitmix64 -- used for seeding and for key derivation finalization.
@@ -91,11 +91,12 @@ pub const Rng = struct {
     pub fn below(self: *Rng, n: u64) u64 {
         std.debug.assert(n > 0);
         if (n == 1) return 0;
-        // Largest multiple of n that fits in u64; reject above it.
-        const limit = std.math.maxInt(u64) - (std.math.maxInt(u64) % n) - (n - 1);
+        // 2^64 mod n values must be rejected so the accepted domain is an
+        // exact multiple of n. Rejecting the low tail avoids representing 2^64.
+        const threshold = rejectionThreshold(u64, n);
         while (true) {
             const r = self.next();
-            if (r <= limit) return r % n;
+            if (r >= threshold) return r % n;
         }
     }
 
@@ -119,6 +120,20 @@ pub const Rng = struct {
         return self.float01() < p;
     }
 };
+
+/// Return `2^bits mod n` without needing an integer wider than `T`.
+/// Kept generic so the rejection proof can be checked exhaustively for u8.
+fn rejectionThreshold(comptime T: type, n: T) T {
+    std.debug.assert(n > 0);
+    return (@as(T, 0) -% n) % n;
+}
+
+/// Reference form of `below` for one supplied word. `null` means reject.
+fn belowWord(comptime T: type, word: T, n: T) ?T {
+    std.debug.assert(n > 0);
+    if (word < rejectionThreshold(T, n)) return null;
+    return word % n;
+}
 
 // ---------------------------------------------------------------------------
 // Stateless key derivation (DEC-004)
@@ -228,6 +243,27 @@ test "rng: below() is unbiased over a small range" {
     for (counts) |c| {
         const dev = @abs(@as(f64, @floatFromInt(c)) - expected) / expected;
         try testing.expect(dev < 0.05);
+    }
+}
+
+test "rng: below rejection domain is exactly uniform for every u8 bound" {
+    var n_wide: u16 = 1;
+    while (n_wide <= std.math.maxInt(u8)) : (n_wide += 1) {
+        const n: u8 = @intCast(n_wide);
+        var counts = [_]u16{0} ** 256;
+        var accepted: u16 = 0;
+
+        for (0..256) |word_wide| {
+            const word: u8 = @intCast(word_wide);
+            if (belowWord(u8, word, n)) |value| {
+                counts[value] += 1;
+                accepted += 1;
+            }
+        }
+
+        const expected: u16 = 256 / n_wide;
+        try testing.expectEqual(expected * n_wide, accepted);
+        for (0..n_wide) |value| try testing.expectEqual(expected, counts[value]);
     }
 }
 

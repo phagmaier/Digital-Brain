@@ -111,6 +111,7 @@ uv run scripts/plot_homeostasis.py     # perturbation recovery
 ```sh
 ./scripts/check-determinism.sh         # runs binary twice, fails if artefacts differ
 ./scripts/check-determinism.sh configs/structural.json
+./scripts/check-golden.sh              # checks default output against the committed baseline
 ```
 
 ---

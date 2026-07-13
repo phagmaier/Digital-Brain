@@ -17,6 +17,7 @@ const cfg = @import("config.zig");
 const sim = @import("sim.zig");
 const task = @import("task.zig");
 const rng = @import("rng.zig");
+const provenance = @import("provenance.zig");
 
 const seeds = [_]u64{ 1, 2, 3, 4 };
 const n_episodes: u32 = 1200;
@@ -158,6 +159,19 @@ pub fn main(init: std.process.Init) !void {
         if (condition.workspace_enabled) workspace_mean = mean else ablated_mean = mean;
     }
     try writeAtomic(io, "workspace.csv", csv.written());
+    try provenance.write(io, gpa, "workspace.meta.json", "workspace_broadcast", .{
+        .seeds = seeds,
+        .workspace_config = baseConfig(seeds[0], true),
+        .ablated_config = baseConfig(seeds[0], false),
+        .conditions = conditions,
+        .n_episodes = n_episodes,
+        .stim_steps = stim_steps,
+        .delay_steps = delay_steps,
+        .readout_steps = readout_steps,
+        .final_window = final_window,
+        .pass_workspace_mean = pass_workspace_mean,
+        .pass_gap = pass_gap,
+    });
 
     const gap = workspace_mean - ablated_mean;
     const pass = workspace_mean >= pass_workspace_mean and gap >= pass_gap;

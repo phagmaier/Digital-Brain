@@ -1,0 +1,14 @@
+
+-- run summary (post burn-in) ------------------------------
+  neurons            100
+  synapses           804
+  steps              3000
+  mean firing rate   0.14119  (spikes / neuron / step)
+  spikes per step    14.119
+  silent fraction    0.000
+  mean u             -0.0349
+  E/I current ratio  1.535
+  VERDICT: alive and sparse. EXP-001 smoke test passes.
+  config             built-in defaults
+  wrote raster.csv, metrics.csv, neurons.csv, synapses.csv, run_meta.json
+

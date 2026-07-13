@@ -34,6 +34,7 @@ const cfg = @import("config.zig");
 const sim = @import("sim.zig");
 const task = @import("task.zig");
 const rng = @import("rng.zig");
+const provenance = @import("provenance.zig");
 
 const seeds = [_]u64{ 1, 2, 3, 4 };
 const block_a_episodes: u32 = 1400; // train the full task (past the exploration plateau)
@@ -251,14 +252,12 @@ pub fn main(init: std.process.Init) !void {
             .{ .name = "on", .r = on }, .{ .name = "off", .r = off },
         }) |row| {
             try csv.writer.print("{d},{s},{d:.4},{d:.4},{d},{d:.4},{d},{d:.4}\n", .{
-                seed,                 row.name,                     row.r.acc_a, row.r.retest,
-                row.r.n_consolidated, row.r.consolidated_survival,
-                row.r.n_tentative,    row.r.tentative_survival,
+                seed,                 row.name,                    row.r.acc_a,       row.r.retest,
+                row.r.n_consolidated, row.r.consolidated_survival, row.r.n_tentative, row.r.tentative_survival,
             });
             try o.print("  {d:>4}  {s:>5}  {d:>5.3}  {d:>7.3}   {d:>4} @ {d:>5.2}      {d:>4} @ {d:>5.2}\n", .{
-                seed,                 row.name,                     row.r.acc_a, row.r.retest,
-                row.r.n_consolidated, row.r.consolidated_survival,
-                row.r.n_tentative,    row.r.tentative_survival,
+                seed,                 row.name,                    row.r.acc_a,       row.r.retest,
+                row.r.n_consolidated, row.r.consolidated_survival, row.r.n_tentative, row.r.tentative_survival,
             });
         }
 
@@ -270,6 +269,20 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try writeAtomic(io, "continual.csv", csv.written());
+    try provenance.write(io, gpa, "continual.meta.json", "continual_consolidation", .{
+        .seeds = seeds,
+        .consolidation_on_config = baseConfig(seeds[0], true),
+        .consolidation_off_config = baseConfig(seeds[0], false),
+        .block_a_episodes = block_a_episodes,
+        .block_b_episodes = block_b_episodes,
+        .retest_episodes = retest_episodes,
+        .stim_steps = stim_steps,
+        .readout_steps = readout_steps,
+        .acc_window = acc_window,
+        .growth_interval = growth_interval,
+        .pass_survival_margin = pass_survival_margin,
+        .pass_retest_margin = pass_retest_margin,
+    });
 
     const nf = @as(f64, @floatFromInt(seeds.len));
     const mean_gap = on_survival_gap / nf;
@@ -293,9 +306,9 @@ pub fn main(init: std.process.Init) !void {
         \\  wrote continual.csv
         \\
     , .{
-        mean_gap,   worst_survival_gap, pass_survival_margin,
-        retest_on,  retest_off,
-        retest_gap, pass_retest_margin,
+        mean_gap,           worst_survival_gap, pass_survival_margin,
+        retest_on,          retest_off,         retest_gap,
+        pass_retest_margin,
         if (pass)
             "PASS -- consolidated pathways survive disuse; unused tentative ones decay."
         else

@@ -1,0 +1,13 @@
+schema_version=1
+baseline_parent_commit=4a84530ddc92af99e1b7f90a9d78a715041a0440
+baseline_change=stage0-hardening
+config_source=src/main.zig built-in defaults
+master_seed=12648430
+prng_algorithm=xoshiro256++
+prng_impl_version=2
+zig_version=0.16.0
+artifact_manifest=default-baseline.sha256
+expected_summary=default-summary.txt
+
+# A commit cannot contain its own final hash. The parent commit plus the commit
+# containing this manifest identify the exact source transition reproducibly.

@@ -38,12 +38,15 @@ zig build arithmetic   # P8/P9: arithmetic curriculum + held-out combinations + 
 
 # Helpers. Plot scripts use uv's inline PEP-723 deps (no venv setup).
 ./scripts/check-determinism.sh [cfg.json]   # runs the binary twice, fails if artefacts differ
+./scripts/check-golden.sh                   # compares default artefacts/summary to committed v1 baseline
 uv run scripts/plot_raster.py               # -> raster.png   (also plot_homeostasis/learning/delay/structural/continual.py)
 ```
 
 Single test by name filter (Zig has no per-file build target; use the compiler directly): `zig test src/sim.zig --test-filter "refractory"`.
 
 `zig build run` overwrites `raster.csv`/`metrics.csv`/`neurons.csv`/`synapses.csv`/`run_meta.json` in the cwd. All generated CSV/PNG artefacts are gitignored (regenerable). With no argument the binary uses the default `Config{}` in `main.zig`; with a JSON path it loads that config (`Config.loadFromFile` accepts a bare Config *or* a `run_meta.json` to replay a prior run; missing fields fall back to struct defaults, so a config need only list overrides). Example configs live in `configs/`.
+
+Every experiment harness also writes a sibling `*.meta.json` provenance manifest containing its seed list, protocol constants, config templates, PRNG implementation version, and Zig version. `scripts/update-golden.sh` is the explicit, review-before-commit workflow for intentional baseline changes.
 
 ## Architecture
 

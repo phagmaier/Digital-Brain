@@ -22,6 +22,7 @@ const cfg = @import("config.zig");
 const sim = @import("sim.zig");
 const task = @import("task.zig");
 const rng = @import("rng.zig");
+const provenance = @import("provenance.zig");
 
 const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
 const n_episodes: u32 = 1500;
@@ -130,6 +131,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try writeAtomic(io, "train.csv", out.written());
+    try provenance.write(io, gpa, "train.meta.json", "immediate_association", .{
+        .seeds = seeds,
+        .config_template = baseConfig(seeds[0]),
+        .n_episodes = n_episodes,
+        .stim_steps = stim_steps,
+        .readout_steps = readout_steps,
+        .block_size = block_size,
+        .final_window = final_window,
+        .pass_mean = pass_mean,
+        .pass_min = pass_min,
+    });
 
     // ---- verdict --------------------------------------------------------
     var sum: f64 = 0;
@@ -164,8 +176,8 @@ pub fn main(init: std.process.Init) !void {
         \\  wrote train.csv
         \\
     , .{
-        mean_acc, pass_mean,
-        min_acc,  pass_min,
+        mean_acc,                                                                                                           pass_mean,
+        min_acc,                                                                                                            pass_min,
         if (pass) "PASS -- learns the association above chance on every seed." else "FAIL -- see per-seed accuracy above.",
     });
     try o.flush();

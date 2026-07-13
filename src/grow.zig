@@ -29,6 +29,7 @@ const cfg = @import("config.zig");
 const sim = @import("sim.zig");
 const task = @import("task.zig");
 const rng = @import("rng.zig");
+const provenance = @import("provenance.zig");
 
 const seeds = [_]u64{ 1, 2, 3, 4 };
 const n_episodes: u32 = 1500;
@@ -224,6 +225,21 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try writeAtomic(io, "structural.csv", csv.written());
+    try provenance.write(io, gpa, "structural.meta.json", "structural_plasticity", .{
+        .seeds = seeds,
+        .structural_on_config = baseConfig(seeds[0], true),
+        .structural_off_config = baseConfig(seeds[0], false),
+        .n_episodes = n_episodes,
+        .stim_steps = stim_steps,
+        .readout_steps = readout_steps,
+        .final_window = final_window,
+        .growth_interval = growth_interval,
+        .pass_acc_mean = pass_acc_mean,
+        .pass_acc_min = pass_acc_min,
+        .min_total_churn = min_total_churn,
+        .rate_alive_lo = rate_alive_lo,
+        .rate_ceiling_tol = rate_ceiling_tol,
+    });
 
     const acc_on_mean = acc_on_sum / @as(f64, @floatFromInt(seeds.len));
     const ceiling = ctrl_hi * rate_ceiling_tol;
@@ -244,9 +260,12 @@ pub fn main(init: std.process.Init) !void {
         \\  wrote structural.csv
         \\
     , .{
-        churn_total,                      min_total_churn,
-        on_lo, on_hi,                     rate_alive_lo, ceiling, rate_ceiling_tol,
-        acc_on_mean, acc_on_min,          pass_acc_mean, pass_acc_min,
+        churn_total,      min_total_churn,
+        on_lo,            on_hi,
+        rate_alive_lo,    ceiling,
+        rate_ceiling_tol, acc_on_mean,
+        acc_on_min,       pass_acc_mean,
+        pass_acc_min,
         if (pass)
             "PASS -- the reservoir rewires while activity stays stable and the task survives."
         else

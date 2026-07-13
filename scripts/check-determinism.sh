@@ -16,7 +16,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-ARTEFACTS=(raster.csv metrics.csv neurons.csv synapses.csv)
+ARTEFACTS=(raster.csv metrics.csv neurons.csv synapses.csv run_meta.json)
 CONFIG_ARG=("$@")
 
 echo "==> building"

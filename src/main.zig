@@ -140,6 +140,7 @@ test {
     _ = @import("arithmetic.zig");
     _ = @import("arithmetic_curriculum.zig");
     _ = @import("termination.zig");
+    _ = @import("provenance.zig");
     _ = sim;
     _ = log;
 }
