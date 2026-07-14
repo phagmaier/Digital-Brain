@@ -422,10 +422,59 @@ Recovery to ≥0.70 typically within 50–350 post-shift episodes (one seed slow
 ~700). Online three-factor learning re-adapts after the flip without a separate
 optimizer.
 
-**What this does *not* claim.** No external BPTT/ESN baseline is compared here
-(Stage 1 #4b). Cost is FLOP-accounting, not wall time. Forgetting is a curve
-under B-only disuse, not a full continual-learning survival/lesion battery
-(that remains Phase 6).
+**What this does *not* claim.** Cost is FLOP-accounting, not wall time. Forgetting
+is a curve under B-only disuse, not a full continual-learning survival/lesion
+battery (that remains Phase 6). External BPTT/ESN comparisons are in the next
+section.
+
+## Stage 1 external baselines — tabular / ESN / BPTT RNN
+
+Report.md Stage 1 and final.md Track E asked for conventional baselines on the
+important tasks, judged on niches (forgetting, sparsity, online cost, shift)
+as well as accuracy. `uv run scripts/baselines.py` trains three external models
+on the same two-choice family protocols (8 seeds):
+
+| model | trained params | immediate | delay-20 | online ops/ep | B-disuse A-retest | overwrite drop | shift drop→post |
+| ----- | -------------- | --------- | -------- | ------------- | ----------------- | -------------- | --------------- |
+| tabular (last-frame logistic) | 6 | **1.000** | **0.506** (chance) | 30 | 1.000 | 1.000 | 0.375 → 1.000 |
+| ESN (64-unit fixed res. + LMS) | 130 / 4354 | **1.000** | **0.848 ± 0.124** | ~172k | 1.000 | 1.000 | 0.825 → 1.000 |
+| BPTT Elman RNN (H=32) | 1186 | **1.000** | **1.000** | ~133k | 1.000 | 1.000 | 0.877 → 1.000 |
+| **SNN (instrument ref.)** | 256 plastic / ~1049 live | **0.980** | (see delay.zig) | ~58k local acct. | cons ON 1.000 / OFF 0.816 | (structural) | 0.590 → 0.935 |
+
+**Takeaways (honest, not marketing):**
+
+1. **Accuracy is not the SNN's niche.** A 32-unit BPTT RNN and a 64-unit ESN both
+   solve immediate association at ceiling, and BPTT holds a delay-20 perfectly.
+   The tabular no-memory control solves immediate but falls to chance on delay —
+   validating that delay actually requires temporal state.
+2. **Online update cost.** BPTT backprop through 40 steps is ~133k accounted ops
+   per episode vs the SNN's ~58k local three-factor ops (eligibility on plastic
+   edges only). ESN forward-only reservoir + tiny readout is ~172k (large fixed
+   matvec) with only 130 trained params. The SNN's local/dense ratio of 0.336 is
+   the structural claim; absolute FLOPs are model-dependent accounting, not a
+   wall-clock race.
+3. **Sparsity.** SNN mean rate ~0.10 spikes/neuron/step; BPTT/ESN hidden units
+   are dense tanh (~0.95–0.98 active fraction above |h|>0.05). Sparse *spiking*
+   activity is a real difference.
+4. **Forgetting under B-disuse.** Orthogonal A/B input channels mean BPTT, ESN,
+   and tabular **do not** forget A when only B is trained (drop 0). The SNN with
+   consolidation OFF *can* forget via permanence decay + pruning of unused plastic
+   pathways (instrument OFF retest 0.816) — that is structural forgetting, not
+   pure weight interference. When the same input's label is overwritten (A→0 then
+   A→1), all external models fully forget the old label (drop 1.0) — classical
+   catastrophic overwrite, which the SNN's consolidation mechanism is designed
+   to resist on rewarded pathways (Phase 6 lesion/survival).
+5. **Distribution shift.** All systems re-adapt after an A↔B mapping flip. BPTT
+   and ESN drop less on the first post-shift block than the SNN (0.88 / 0.83 vs
+   0.59) and recover to ceiling; the SNN recovers too but from a deeper dip.
+
+**Arithmetic.** Finite-state/tabular controls for the arithmetic held-out split
+are already in `arithmetic` (`controller_only` and pair-lookup prior). A BPTT
+seq2seq on that curriculum is left as a Stage-2 comparison if composition in
+the spiking substrate is revisited; it is not required to close Stage 1.
+
+Artefacts: `baseline.csv`, `baseline_curves.csv`, `baseline.meta.json`,
+`baseline.png` (`uv run scripts/plot_baselines.py`).
 
 ## Cross-cutting engineering notes
 

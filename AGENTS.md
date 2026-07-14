@@ -36,11 +36,12 @@ zig build continual    # P6: continual learning (train A -> B -> retest A), cons
 zig build workspace    # P7: workspace broadcast vs ablation -> workspace.csv
 zig build arithmetic   # P8/P9: arithmetic curriculum + held-out combinations + stable termination -> arithmetic.csv
 zig build instrument   # Stage 1: cost/sparsity/forgetting/shift instrumentation -> instrument_*.csv
+uv run scripts/baselines.py  # Stage 1: tabular/ESN/BPTT external baselines -> baseline.csv
 
 # Helpers. Plot scripts use uv's inline PEP-723 deps (no venv setup).
 ./scripts/check-determinism.sh [cfg.json]   # runs the binary twice, fails if artefacts differ
 ./scripts/check-golden.sh                   # compares default artefacts/summary to committed v1 baseline
-uv run scripts/plot_raster.py               # -> raster.png   (also plot_homeostasis/learning/delay/structural/continual/instrument.py)
+uv run scripts/plot_raster.py               # -> raster.png   (also plot_homeostasis/learning/delay/structural/continual/instrument/baselines.py)
 ```
 
 Single test by name filter (Zig has no per-file build target; use the compiler directly): `zig test src/sim.zig --test-filter "refractory"`.
@@ -63,6 +64,7 @@ Core modules and experiment roots under `src/` are all pure Zig with no dependen
 - **`termination.zig`** — Phase 9's deterministic stable-answer detector and sparse terminal reward mapping.
 - **`workspace.zig`** — the Phase 7 experiment harness: workspace-on/off delayed-association training with a capacity-one bottleneck and a causal accuracy-gap verdict over 20 paired seeds with 95% CIs (CI lower bound).
 - **`instrument.zig`** — Stage 1 instrumentation (report.md): online-update cost accounting (local three-factor vs dense baseline), activity/weight sparsity, A→B forgetting curves (consolidation on/off), and distribution-shift re-adaptation after a mid-run mapping flip. Lesion resistance is deferred to `continual.zig`.
+- **`scripts/baselines.py`** — Stage 1 external baselines (report.md / final.md Track E): tiny BPTT Elman RNN, echo-state network (fixed reservoir + online linear readout), and last-frame tabular logistic, compared on immediate/delay association, B-disuse forgetting, label-overwrite, and mapping-flip shift. Not part of the Zig SNN.
 - **`log.zig`** — `Logger` (raster + per-step metrics), CSV writers, and `Summary` (the run verdict: DEAD / SATURATED / alive-and-sparse).
 - **`main.zig`** — wires it together; runs the loop, writes artefacts atomically, prints the summary.
 - **`root.zig`** — the library module root (currently only a placeholder `add`). `build.zig` builds two test executables: one rooted here and one at `main.zig`, whose `refAllDecls` plus explicit imports pull module tests into the executable test target.
