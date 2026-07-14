@@ -16,7 +16,7 @@ A reproducible simulator of fixed-graph stochastic spiking neurons, written in Z
 - **Stage 2 — recurrent plasticity on a context-dependent delayed task (DEC-014)**: delayed XOR mapping (`context_task.zig`) with temporally separated context and cue; plastic stimulus→action readout (linearly inseparable on the four assemblies alone); optional **reservoir weight plasticity** (`reservoir_plasticity_enabled`) so local three-factor learning can reshape recurrent edges; `zig build recurrent` compares readout-only / structural-only / recurrent / recurrent+consolidation, lesions the learned recurrent changes, and probes context-separable reservoir activity over paired seeds with 95% CIs. The scientific verdict is an open criterion (honest FAIL until recurrent credit assignment clears the bars) — same discipline as P8's `learned_readout` FAIL.
 - **Stage 3 Track A — stochasticity factorial + forced exploration + WTA credit**: `stochastic_firing` / `stochastic_release` config gates (default true = Phase 1 behaviour). Deterministic firing is a hard `u >= threshold` step; deterministic release is mean-preserving (`current *= p_release`, no Bernoulli drop). `Sim.maskEligibilityToTargets` implements winner-take-all credit (only plastic synapses into the chosen action keep eligibility). `zig build stochastic` runs the 2×2 firing×release factorial plus forced-ε exploration and WTA-credit conditions on the two-choice association, reporting final accuracy, episodes-to-90%, and takeoff time over 20 seeds with 95% CIs.
 
-Every later-phase mechanism is **off by default** so the Phase 1 baseline run is unchanged; they are enabled via config or the experiment harnesses. Stochastic firing/release default **on** (baseline); the det ablations flip those flags.
+Every later-phase mechanism is **off by default** so the Phase 1 baseline run is unchanged; they are enabled via config or the experiment harnesses. **Exception:** `stochastic_firing` and `stochastic_release` default **on** (Phase 1 baseline behaviour); the deterministic ablations flip those flags off. `reservoir_plasticity_enabled` defaults **off** (fixed reservoir is the baseline).
 
 ## Commands
 
@@ -129,6 +129,10 @@ The tests in `sim.zig`, `net.zig`, `arithmetic.zig`, and `termination.zig` aren'
 3. Run `zig fmt` on touched Zig files, then `zig build test`. Run the affected harness with `-Doptimize=ReleaseFast` when changing an exit criterion.
 4. Treat an experiment verdict failure as a model regression, not test flakiness. Do not relax thresholds without documenting a scientific reason in `findings.md`.
 
-## Findings
+## Key documents
 
-`findings.md` contains Phases 1–9, including the measured Phase 7 workspace ablation, Phase 8 held-out-combination result, and Phase 9 termination mechanism.
+- **`findings.md`** — Empirical results and lessons from every phase and stage: P1–P9 interaction findings, Stage 1 instrumentation/baselines, Stage 2 recurrent plasticity (FAIL), Stage 3 Track A stochasticity/WTA factorial. The canonical record of what we learned by running the thing.
+- **`report.md`** — External audit (prior to Stage 0 hardening). Historical — most items are now addressed.
+- **`final.md`** — Project assessment: what was achieved, novelty estimate, research tracks, whether to continue.
+- **`REMAINING.md`** — Checklist of report.md items and their current status.
+- **`Brain Inspired Local Learning System.md`** — Original project specification/plan.

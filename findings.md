@@ -1,4 +1,4 @@
-# Findings — Phases 1–8
+# Findings — Phases 1–9, Stage 1–3 Track A
 
 Observations worth remembering from building the brain-inspired local-learning
 system. Not a spec (see the Obsidian note for that) and not a changelog (see git
@@ -78,13 +78,12 @@ seam, built in Phase 2, is exactly what Phases 3–4 needed.
 
 ## Phase 3 — local reward learning
 
-**Learning is exploration-limited, not rate-limited.** The learning curve is a
-flat ~600-episode plateau near chance, then a sharp rise to ceiling — and raising
-the learning rate 3× barely moved the takeoff point (and slightly *lowered* final
-accuracy). The bottleneck is breaking the initial symmetry via stochastic
-exploration, not the step size. If we ever want faster learning, the lever is
-better credit assignment (winner-take-all / lateral inhibition between action
-groups, or crediting only the chosen action), not a bigger `learning_rate`.
+**Learning is exploration-limited, not rate-limited — or so we thought.** The
+learning curve is a flat ~600-episode plateau near chance, then a sharp rise to
+ceiling — and raising the learning rate 3× barely moved the takeoff point (and
+slightly *lowered* final accuracy). The bottleneck appeared to be breaking the
+initial symmetry via stochastic exploration. **Stage 3 Track A later refined this:**
+the bottleneck is really *credit assignment*, not exploration — see below.
 
 **The reward baseline is load-bearing for cross-seed reliability.** Subtracting a
 running EMA of reward (REINFORCE-with-baseline) makes the weight update zero-mean
@@ -192,6 +191,8 @@ seeds pass at 100% accuracy — identical to the control — while the reservoir
 rewires underneath. Homeostasis is doing the real work of keeping it stable; the
 pairing (rewire + regulate) *is* the result.
 
+---
+
 ## Phase 6 — consolidation
 
 **Consolidation must use RAW reward, not the baseline-subtracted modulator — this
@@ -219,9 +220,7 @@ two-choice task: the permanence centered accrues *early* in block A, before the
 baseline saturates, is already enough to carry the pathway through block B's
 disuse. So on this task the raw-vs-centered difference is real in the permanence
 bands and invisible at the behavioural readout — the retest metric is
-ceiling-limited and cannot separate them. A task with a longer or more
-interfering block B, where partial permanence is not enough to survive, is what
-would turn the band-level difference into a behavioural one.
+ceiling-limited and cannot separate them.
 
 **Reward-gated for plastic, activity-gated for reservoir — and the distinction is
 principled, not incidental.** §8.3 defines consolidated as "repeatedly associated
@@ -241,10 +240,10 @@ after block A we tag each plastic synapse consolidated (q ≥ 0.6) or tentative
 result is clean and stark — over 17 mastered seeds the consolidated − tentative
 survival gap is **0.951 ± 0.045** (95% CI, raw consolidation), i.e. consolidated
 survival ≈ 0.95 against tentative ≈ 0.00. Trying instead to measure survival by
-*weight* was noisy and misleading: a
-functionally-intact pathway (retest accuracy 1.0) can sit at a tiny absolute weight
-(0.08 is enough to win a readout), so weight magnitude hides the survival signal
-that the alive/pruned distinction shows plainly.
+*weight* was noisy and misleading: a functionally-intact pathway (retest accuracy
+1.0) can sit at a tiny absolute weight (0.08 is enough to win a readout), so
+weight magnitude hides the survival signal that the alive/pruned distinction shows
+plainly.
 
 **The clean control is the reward term, not the whole mechanism.** To show
 consolidation is *what* preserves the pathway, the OFF condition keeps the entire
@@ -257,51 +256,47 @@ forget.
 
 **The protocol was hardened per report.md §5, and the causal claim is now a lesion,
 not just a survival correlation.** Four changes: (1) block A trains to a *mastery
-criterion* (0.90 rolling accuracy) rather than a fixed length, so a weak block-A
-fit cannot masquerade as forgetting — the earlier fixed-length run left two seeds
-at 0.47/0.74 accuracy; (2) seeds that never master block A within the cap are
-reported separately and **excluded from the verdict** (3/20 here: seeds 1, 3, 14);
-(3) the sample is **20 paired seeds** with 95% confidence intervals, and the
-verdict is judged on the CI *lower bound*, not the point estimate; (4) a
+criterion* (0.90 rolling accuracy) rather than a fixed length; (2) seeds that
+never master block A within the cap are reported separately and **excluded from
+the verdict**; (3) the sample is **20 paired seeds** with 95% confidence intervals,
+and the verdict is judged on the CI *lower bound*, not the point estimate; (4) a
 **pathway-specific lesion** — after retest, the plastic `input_a → action_0`
 readout weights are zeroed and A is retested again. This is the causal test the
 survival contrast alone could not give: permanence is *definitionally* what
 resists pruning, so "high-permanence synapses survive" is partly built into the
-rule. The lesion asks the functional question directly — is the retained A
-behaviour actually carried by that specific consolidated pathway? It is: zeroing
-it drops raw-consolidation retest by **0.943 ± 0.112** (retest ≈ 0.94 → ≈ 0.00),
-while under OFF the same lesion costs only 0.183 because the pathway had already
-decayed and the residual A-retest was near chance. Consolidation does not merely
-correlate with a surviving band; it builds the pathway the behaviour depends on.
+rule. The lesion asks the functional question directly: zeroing it drops
+raw-consolidation retest by **0.943 ± 0.112** (retest ≈ 0.94 → ≈ 0.00), while
+under OFF the same lesion costs only 0.183 because the pathway had already decayed.
+Consolidation does not merely correlate with a surviving band; it builds the
+pathway the behaviour depends on.
+
+---
 
 ## Phase 7 — workspace broadcast
 
 **A capacity-one workspace produces a causal long-delay benefit, not just an
 extra activity trace.** The controlled `workspace` harness removes the Phase 4
 self-exciting memory assembly, holds the stimulus over a 40-step delay, and
-changes only `workspace_enabled`. Across **20 paired seeds** (Stage 1 / report.md),
-the enabled condition reached **0.724 ± 0.072** mean accuracy versus **0.530 ± 0.022**
-for the otherwise-identical ablation: a **+0.194 ± 0.072** paired causal gain
-(95% normal CIs; criterion judged on the CI *lower* bound: enabled ≥ 0.65 and
-gain ≥ 0.10 — both clear). The ablated workspace state was exactly 0 by
-construction; the enabled delay state averaged **0.957 ± 0.018**. This is the
-important result: a bottlenecked winner can retain and broadcast task-relevant
-state after the stimulus is gone.
+changes only `workspace_enabled`. Across **20 paired seeds**, the enabled condition
+reached **0.724 ± 0.072** mean accuracy versus **0.530 ± 0.022** for the
+otherwise-identical ablation: a **+0.194 ± 0.072** paired causal gain (95% normal
+CIs; criterion judged on the CI *lower* bound: enabled ≥ 0.65 and gain ≥ 0.10 —
+both clear). The ablated workspace state was exactly 0 by construction; the
+enabled delay state averaged **0.957 ± 0.018**.
 
 **The workspace is intentionally a competition, not a second unconstrained
 reservoir.** Candidate evidence is collected from the task assemblies, an
 ignition threshold admits a winner, `workspace_capacity = 1` bounds access, and
 decay prevents it becoming a permanent latch. The weak feedback/broadcast is
-then a common bias plus winner-specific feedback. When editing it, preserve the
-on/off ablation as a one-flag comparison; adding a second persistence mechanism
-would make the causal interpretation ambiguous.
+then a common bias plus winner-specific feedback.
 
-**Mean performance hides seed variance, so retain both the per-seed CSV and the
-CI lower-bound criterion.** Enabled seeds still span ~0.48–1.00 while ablated
-stays near chance (~0.47–0.62). A few seeds (e.g. 2, 10, 16) show essentially
-no gain; the pass criterion therefore uses the multi-seed mean *and* an explicit
-paired ablation gap, each judged on the 95% CI lower bound — not a claim that
-every seed solves the task perfectly.
+**Mean performance hides seed variance.** Enabled seeds still span ~0.48–1.00
+while ablated stays near chance (~0.47–0.62). A few seeds show essentially no
+gain; the pass criterion uses the multi-seed mean *and* an explicit paired
+ablation gap, each judged on the 95% CI lower bound — not a claim that every seed
+solves the task perfectly.
+
+---
 
 ## Phase 8 — symbolic arithmetic curriculum
 
@@ -322,8 +317,41 @@ per `rhs`; the controller has no `(lhs, rhs) → answer` storage. The reached st
 then participates in the fixed-duration answer-assembly readout and competition.
 This is a deliberately structured controller coupled to spiking action
 assemblies — **not** evidence that the unconstrained reservoir spontaneously
-invented symbolic arithmetic. Preserve that distinction when interpreting or
-extending Phase 8.
+invented symbolic arithmetic.
+
+**The held-out result is controller-driven, not learned-readout generalization —
+the ablation matrix isolates this.** Training excludes every nonzero addition
+with result four (`1+3`, `2+2`, `3+1`) while retaining the needed unit transitions
+and examples that produce answer four. The harness reports the five-condition
+ablation matrix (`zig build arithmetic`, 4 seeds × 240 held trials each):
+
+| condition | held-acc | gain vs lookup (0.111) | stable-term |
+|---|---:|---:|---:|
+| `full` (original) | 1.000 | +0.889 | 1.000 |
+| `current_no_vote` (controller current into SNN, spike counts only) | 0.116 | +0.005 | 0.000 |
+| `learned_readout` (trained readout, controller removed) | 0.118 | +0.007 | 0.000 |
+| `frozen_controller` (untrained readout, full controller) | 1.000 | +0.889 | 1.000 |
+| `controller_only` (finite-state `solve`, no SNN) | 1.000 | +0.889 | 0.000 |
+
+The reading is unambiguous. The pure finite-state controller scores 1.000 with
+no network at all, and an **untrained** network plus the controller also scores
+1.000 — so the composed answer, not any learned spiking readout, produces the
+result. The learned readout *on its own* sits at the 1/9 lookup prior (0.118 vs
+0.111). The harness verdict is now judged on the honest condition
+(`learned_readout`) and therefore **FAILs** by design — this failure is the
+corrected scientific claim, not a regression. The genuine, defensible result is
+the `controller_only` line: bounded single-operation arithmetic is solved by
+composing rewarded unit transitions, beating an exact-pair lookup on the
+controlled split. The spiking substrate does not yet carry that computation.
+
+**Fixed-duration readout is an important boundary condition.** Each answer is
+read from a preconfigured final window rather than a learned stop signal. During
+curriculum training a local teaching current makes the rewarded answer assembly
+co-active with the symbols so existing pre×post eligibility can tag the plastic
+readout. At evaluation, weights and the transition model are frozen; the neutral
+probe and the composed state vote select the answer.
+
+---
 
 ## Phase 9 — learned termination
 
@@ -342,57 +370,20 @@ smaller configured penalty (default `-0.2`). The scalar is sent through the
 existing eligibility-trace `applyReward()` path; Phase 9 adds no second learning
 rule and consumes no RNG, so reproducibility is preserved.
 
-**The held-out result is controller-driven, not learned-readout generalization
-— the ablation matrix isolates this.** Training excludes every nonzero addition
-with result four (`1+3`, `2+2`, `3+1`) while retaining the needed unit transitions
-and examples that produce answer four. The original harness reported **1.000**
-mean held-out accuracy, but that number combined three effects that report.md §1
-flagged as conflated: the trained spiking readout, an answer-specific current
-injected into the composed answer assembly (`transition_action_current = 100`),
-and a *direct vote* the controller adds straight into the spike-count readout
-(`transition_termination_vote`). The harness now reports the five-condition
-ablation matrix (`zig build arithmetic`, 4 seeds × 240 held trials each):
+**Caveat:** the stable-answer signal is driven by the controller's direct
+`transition_termination_vote` — the ablation matrix shows stable-termination
+collapses to 0.000 without that vote — so this is *evidence-triggered termination
+over controller-assisted answers*, not learned termination (report.md §1).
 
-| condition | held-acc | gain vs lookup (0.111) | stable-term |
-|---|---|---|---|
-| `full` (original) | 1.000 | +0.889 | 1.000 |
-| `current_no_vote` (controller current into SNN, spike counts only) | 0.116 | +0.005 | 0.000 |
-| `learned_readout` (trained readout, controller removed) | 0.118 | +0.007 | 0.000 |
-| `frozen_controller` (untrained readout, full controller) | 1.000 | +0.889 | 1.000 |
-| `controller_only` (finite-state `solve`, no SNN) | 1.000 | +0.889 | 0.000 |
-
-The reading is unambiguous. The pure finite-state controller scores 1.000 with
-no network at all, and an **untrained** network plus the controller also scores
-1.000 — so the composed answer, not any learned spiking readout, produces the
-result. The learned readout *on its own* sits at the 1/9 lookup prior (0.118 vs
-0.111), and injecting the controller's current into the readout without the direct
-vote does not lift it (0.116). "Stable termination" likewise depends entirely on
-the direct vote: it is 1.000 with the vote and 0.000 without it, so it is
-**evidence-triggered termination over controller-assisted answers, not learned
-termination** (report.md §1). The harness verdict is now judged on the honest
-condition (`learned_readout`) and therefore **FAILs** by design — this failure is
-the corrected scientific claim, not a regression. The genuine, defensible result
-is the `controller_only` line: bounded single-operation arithmetic is solved by
-composing rewarded unit transitions, beating an exact-pair lookup on the
-controlled split. The spiking substrate does not yet carry that computation.
-
-**Fixed-duration readout is an important boundary condition.** Each answer is
-read from a preconfigured final window rather than a learned stop signal. During
-curriculum training a local teaching current makes the rewarded answer assembly
-co-active with the symbols so existing pre×post eligibility can tag the plastic
-readout. At evaluation, weights and the transition model are frozen; the neutral
-probe and the composed state vote select the answer. Do not turn this into a
-variable-duration protocol without defining a new termination/control
-experiment.
+---
 
 ## Stage 1 instrumentation — cost, sparsity, forgetting, shift
 
-Report.md Stage 1 asked to measure the niches where a local three-factor system
-might compete (not only final accuracy). The `instrument` harness
-(`zig build instrument -Doptimize=ReleaseFast`) runs four tracks on the
-two-choice association over 8 seeds and writes `instrument_cost.csv`,
-`instrument_forgetting.csv`, `instrument_shift.csv` (+ `instrument.meta.json`).
-Lesion resistance remains the load-bearing probe in `continual.zig` (Phase 6).
+The `instrument` harness (`zig build instrument -Doptimize=ReleaseFast`) runs
+four tracks on the two-choice association over 8 seeds and writes
+`instrument_cost.csv`, `instrument_forgetting.csv`, `instrument_shift.csv`
+(+ `instrument.meta.json`). Lesion resistance remains the load-bearing probe in
+`continual.zig` (Phase 6).
 
 **Online-update cost (accounting model).** Eligibility + reward touch the 256
 plastic readout edges; a dense baseline touches every live synapse each step
@@ -408,9 +399,7 @@ nearly the whole population participates weakly under the task stimulus. Referen
 final accuracy under the same protocol: **0.980 ± 0.023**.
 
 **Forgetting curves.** Train A (full task) then force only B, probing frozen A
-accuracy every 50 block-B episodes. Consolidation uses the continual protocol
-knob (`consolidation_enabled=true` always so plastic edges join the slow clock;
-OFF zeros `consolidation_lr` only). End-of-disuse A-retest: consolidation ON
+accuracy every 50 block-B episodes. End-of-disuse A-retest: consolidation ON
 **1.000 ± 0.000**, OFF **0.816 ± 0.167**, gap **0.184 ± 0.167**. Seed variance
 under OFF is large (some seeds stay near ceiling, others fall toward chance) — the
 time series in `instrument_forgetting.csv` is the artefact, not a single number.
@@ -418,21 +407,15 @@ time series in `instrument_forgetting.csv` is the artefact, not a single number.
 **Distribution-shift adaptation.** Mid-run reward mapping flip (A→0/B→1 →
 A→1/B→0) at episode 1000. Pre-shift block accuracy **0.930 ± 0.084**, first
 post-shift block **0.590 ± 0.088**, final post-shift block **0.935 ± 0.086**.
-Recovery to ≥0.70 typically within 50–350 post-shift episodes (one seed slower at
-~700). Online three-factor learning re-adapts after the flip without a separate
-optimizer.
+Recovery to ≥0.70 typically within 50–350 post-shift episodes. Online three-factor
+learning re-adapts after the flip without a separate optimizer.
 
-**What this does *not* claim.** Cost is FLOP-accounting, not wall time. Forgetting
-is a curve under B-only disuse, not a full continual-learning survival/lesion
-battery (that remains Phase 6). External BPTT/ESN comparisons are in the next
-section.
+---
 
 ## Stage 1 external baselines — tabular / ESN / BPTT RNN
 
-Report.md Stage 1 and final.md Track E asked for conventional baselines on the
-important tasks, judged on niches (forgetting, sparsity, online cost, shift)
-as well as accuracy. `uv run scripts/baselines.py` trains three external models
-on the same two-choice family protocols (8 seeds):
+`uv run scripts/baselines.py` trains three external models on the same two-choice
+family protocols (8 seeds):
 
 | model | trained params | immediate | delay-20 | online ops/ep | B-disuse A-retest | overwrite drop | shift drop→post |
 | ----- | -------------- | --------- | -------- | ------------- | ----------------- | -------------- | --------------- |
@@ -441,89 +424,29 @@ on the same two-choice family protocols (8 seeds):
 | BPTT Elman RNN (H=32) | 1186 | **1.000** | **1.000** | ~133k | 1.000 | 1.000 | 0.877 → 1.000 |
 | **SNN (instrument ref.)** | 256 plastic / ~1049 live | **0.980** | (see delay.zig) | ~58k local acct. | cons ON 1.000 / OFF 0.816 | (structural) | 0.590 → 0.935 |
 
-**Takeaways (honest, not marketing):**
+**Takeaways:**
 
 1. **Accuracy is not the SNN's niche.** A 32-unit BPTT RNN and a 64-unit ESN both
    solve immediate association at ceiling, and BPTT holds a delay-20 perfectly.
-   The tabular no-memory control solves immediate but falls to chance on delay —
-   validating that delay actually requires temporal state.
 2. **Online update cost.** BPTT backprop through 40 steps is ~133k accounted ops
-   per episode vs the SNN's ~58k local three-factor ops (eligibility on plastic
-   edges only). ESN forward-only reservoir + tiny readout is ~172k (large fixed
-   matvec) with only 130 trained params. The SNN's local/dense ratio of 0.336 is
-   the structural claim; absolute FLOPs are model-dependent accounting, not a
-   wall-clock race.
+   per episode vs the SNN's ~58k local three-factor ops. The SNN's local/dense
+   ratio of 0.336 is the structural claim; absolute FLOPs are model-dependent
+   accounting, not a wall-clock race.
 3. **Sparsity.** SNN mean rate ~0.10 spikes/neuron/step; BPTT/ESN hidden units
    are dense tanh (~0.95–0.98 active fraction above |h|>0.05). Sparse *spiking*
    activity is a real difference.
 4. **Forgetting under B-disuse.** Orthogonal A/B input channels mean BPTT, ESN,
    and tabular **do not** forget A when only B is trained (drop 0). The SNN with
    consolidation OFF *can* forget via permanence decay + pruning of unused plastic
-   pathways (instrument OFF retest 0.816) — that is structural forgetting, not
-   pure weight interference. When the same input's label is overwritten (A→0 then
-   A→1), all external models fully forget the old label (drop 1.0) — classical
-   catastrophic overwrite, which the SNN's consolidation mechanism is designed
-   to resist on rewarded pathways (Phase 6 lesion/survival).
+   pathways — structural forgetting, not pure weight interference. When the same
+   input's label is overwritten (A→0 then A→1), all external models fully forget
+   the old label (drop 1.0) — classical catastrophic overwrite, which the SNN's
+   consolidation mechanism is designed to resist on rewarded pathways.
 5. **Distribution shift.** All systems re-adapt after an A↔B mapping flip. BPTT
    and ESN drop less on the first post-shift block than the SNN (0.88 / 0.83 vs
    0.59) and recover to ceiling; the SNN recovers too but from a deeper dip.
 
-**Arithmetic.** Finite-state/tabular controls for the arithmetic held-out split
-are already in `arithmetic` (`controller_only` and pair-lookup prior). A BPTT
-seq2seq on that curriculum is left as a Stage-2 comparison if composition in
-the spiking substrate is revisited; it is not required to close Stage 1.
-
-Artefacts: `baseline.csv`, `baseline_curves.csv`, `baseline.meta.json`,
-`baseline.png` (`uv run scripts/plot_baselines.py`).
-
-## Cross-cutting engineering notes
-
-- **Every phase's mechanism is off by default.** The Phase 1 baseline run is
-  byte-identical across all eight phases of development — new machinery only
-  activates when its config flag is set. This is what keeps the determinism guard
-  and the Phase 1 regression baseline meaningful as the system grows.
-- **Focused tests and experiment harnesses are the exit criteria.** Unit tests
-  guard invariants and mechanism prerequisites; deterministic multi-seed
-  harnesses (`train` through `arithmetic`) establish behavioural criteria and
-  write the evidence CSV. Neither category is flaky: same seed/config gives the
-  same output, so thresholds should sit safely below the observed result. Treat
-  a failure as a model regression, not noise to be ignored.
-- **Experiment harnesses are separate executables** (`sweep`/`perturb`/`train`/
-  `delay`/`grow`/`continual`/`workspace`/`arithmetic`/`instrument`), each with
-  tunable top-level constants and a PASS/FAIL (or instrumentation-complete)
-  verdict. They emit CSV artefacts; plotting scripts currently cover raster,
-  homeostasis, learning, delay, structural, continual, and instrument
-  experiments. Run compute-heavy harnesses with `-Doptimize=ReleaseFast`.
-
-## Open threads for later phases
-
-- Faster learning via better credit assignment (see Phase 3 note) — only if we
-  care about episodes-to-criterion.
-- A true attractor working memory (bistability) if delays need to be effectively
-  unbounded (see Phase 4 note).
-- The recurrent reservoir's *weights* are still never trained — Phase 5 changes
-  its *topology* (grow/prune) but grown edges are non-plastic and fixed-weight.
-  Reward-gated permanence exists (Phase 6, DEC-012) but only on the *plastic*
-  readout edges; making *reservoir* edges eligible so reward can consolidate them
-  too is the natural next lever if reservoir credit assignment matters.
-- Phase 5's pruning is disuse-driven and therefore quiet in a homeostatic network.
-  If a later phase wants *visible* turnover (e.g. to study forgetting), the lever
-  is an activity-biased or error-biased growth heuristic (§8.8 #2/#4) plus a
-  co-activity signal measured during a quiet baseline, not the stimulus-inflated
-  rate EMA we read at the growth window.
-- Phase 7 currently establishes only a capacity-one, two-choice delayed-task
-  broadcast result. Multi-item access, interference, and a learned admission
-  policy remain open experiments; preserve the one-flag ablation before adding
-  any of them.
-- Phase 8's controller ablation matrix is now the honest record: bounded
-  transition composition (the `controller_only` finite-state baseline) beats an
-  exact-pair lookup, but the spiking readout carries none of that computation —
-  isolated, it sits at the 1/9 prior, and the frozen-network condition scores
-  1.000 on the controller alone. The open task is making the *spiking substrate*
-  perform the composition: a plastic recurrent/readout path that generalizes on
-  the held split with the controller removed, over larger ranges and
-  independently held results/operators. This is the entry point to Stage 2's
-  context-dependent delayed task.
+---
 
 ## Stage 2 — recurrent plasticity on a context-dependent delayed task (DEC-014)
 
@@ -534,9 +457,10 @@ Artefacts: `baseline.csv`, `baseline_curves.csv`, `baseline.meta.json`,
 - **`context_task.zig`**: six-group layout (context_x/y, cue_a/b, action_0/1) and
   delayed XOR mapping (X,A)→0, (X,B)→1, (Y,A)→1, (Y,B)→0.
 - **Graph** (`net.zig`): context-group self-excitation (`context_hold_weight`);
-  plastic stimulus→action readout from all four assemblies (still not a linear
-  shortcut — XOR is not linearly separable in those rates); optional
-  `reservoir_plasticity_enabled` marks reservoir (and grown) edges plastic.
+  plastic stimulus→action readout from all four assemblies (XOR is not linearly
+  separable in those rates); optional `reservoir_plasticity_enabled` marks
+  reservoir (and grown) edges plastic so the three-factor rule can reshape
+  recurrent weights.
 - **Slow clock consistency**: when a structural edge is also plastic, permanence
   is reward-driven (not co-activity), matching DEC-012.
 - **Harness** (`zig build recurrent`): paired multi-seed comparison of
@@ -546,22 +470,30 @@ Artefacts: `baseline.csv`, `baseline_curves.csv`, `baseline.meta.json`,
   95% CI lower bounds: recurrent accuracy, gap vs readout-only, gap vs lesion,
   and separability gap.
 
-### Initial scientific result
+### Scientific result
 
-First ReleaseFast multi-seed run sits near chance for every condition (no reliable
-recurrent advantage, no lesion collapse). That is an **honest FAIL of the Stage 2
-exit criterion**, not a mechanism regression — analogous to P8's `learned_readout`
-FAIL. Mechanism unit tests pass; the open problem is whether local three-factor
+**Honest FAIL of the Stage 2 exit criterion.** A ReleaseFast multi-seed run sits
+near chance for every condition — no reliable recurrent advantage, no lesion
+collapse. The fixed-reservoir readout cannot solve the XOR mapping (as expected —
+the four assembly rates alone are linearly inseparable), but local three-factor
+plasticity inside the reservoir does not yet rescue it under the tested protocol.
+
+This is **not** a mechanism regression — mechanism unit tests pass. It is the same
+discipline as P8's `learned_readout` FAIL: the claim is "the open problem stands,"
+not "the mechanism is broken." The open question is whether local three-factor
 credit assignment inside the reservoir can create a capability the fixed-reservoir
-readout cannot, under matched budgets. Next levers if pursuing the criterion:
-longer training / curriculum (identity then XOR), forced exploration or WTA action
-competition, eligibility spanning, restricted plastic subgraphs, and external
-baselines (ESN full-reservoir readout, tiny BPTT) on the same task.
+readout cannot, under matched budgets.
+
+**Next levers if pursuing the criterion:** longer training / curriculum (identity
+then XOR), forced exploration or WTA action competition (see Stage 3 Track A
+below), eligibility spanning, restricted plastic subgraphs, and external baselines
+(ESN full-reservoir readout, tiny BPTT) on the same task.
+
+---
 
 ## Stage 3 Track A — stochasticity factorial + forced exploration + WTA credit
 
-**Implemented** as the first Stage 3 mechanism-science track (`report.md` /
-`final.md` Track A).
+**Implemented** as the first Stage 3 mechanism-science track.
 
 ### Mechanism
 
@@ -587,19 +519,104 @@ baselines (ESN full-reservoir readout, tiny BPTT) on the same task.
 | stoch + explore + WTA | 1.000 | **500** | **420** |
 | det + explore + WTA | 1.000 | **475** | **413** |
 
-**Takeaways:**
+### Takeaways
 
 1. **Credit assignment, not stochastic exploration, is the bottleneck.** WTA
    credit alone cuts median episodes-to-90% by ~150; combined with annealed
    forced exploration it nearly halves takeoff (~875 → ~500). Forced exploration
-   *alone* does not speed learning — confirming Phase 3's "exploration-limited"
-   reading is really *credit-limited* once both actions can be sampled.
+   *alone* does not speed learning — **the Phase 3 "exploration-limited" reading
+   was wrong; the bottleneck is credit assignment.** Once the system knows *which*
+   synapses to credit, exploration follows naturally.
+
 2. **Firing and release noise are largely redundant for this task.** Any one of
    the four stochasticity cells still masters the association; fully det is only
    slightly worse asymptotically (0.95 vs 1.00) and, with explore+WTA, matches
    the stochastic ceiling at *faster* takeoff.
+
 3. **Mean-preserving det release** keeps dynamics comparable (no drive doubling),
    so the factorial is a clean noise ablation rather than a weight rescaling.
 
-Implication for Stage 2: the same WTA/explore levers should be tried on the
-context-XOR before concluding local recurrent plasticity cannot work.
+**Implication for Stage 2:** the same WTA/explore levers should be tried on the
+context-XOR before concluding local recurrent plasticity cannot work. The phase-3
+"exploration-limited" bottleneck was really a credit-assignment bottleneck all
+along; Stage 2 may be hitting the same wall.
+
+---
+
+## Cross-cutting engineering notes
+
+- **Every phase's mechanism is off by default.** The Phase 1 baseline run is
+  byte-identical across all phases of development — new machinery only activates
+  when its config flag is set. This is what keeps the determinism guard and the
+  Phase 1 regression baseline meaningful as the system grows.
+- **Focused tests and experiment harnesses are the exit criteria.** Unit tests
+  guard invariants and mechanism prerequisites; deterministic multi-seed
+  harnesses (`train` through `stochastic`) establish behavioural criteria and
+  write the evidence CSV. Neither category is flaky: same seed/config gives the
+  same output, so thresholds should sit safely below the observed result. Treat
+  a failure as a model regression, not noise to be ignored.
+- **Experiment harnesses are separate executables** (`sweep`/`perturb`/`train`/
+  `delay`/`grow`/`continual`/`workspace`/`arithmetic`/`instrument`/`recurrent`/
+  `stochastic`), each with tunable top-level constants and a PASS/FAIL (or
+  instrumentation-complete) verdict. They emit CSV artefacts; plotting scripts
+  currently cover raster, homeostasis, learning, delay, structural, continual,
+  instrument, and baseline experiments. Run compute-heavy harnesses with
+  `-Doptimize=ReleaseFast`.
+
+---
+
+## Synthesis: what we learned and what remains open
+
+### Genuine findings
+
+1. **Working memory is a system property, not a single mechanism.** Selective
+   persistence required self-excitation × homeostasis × learning to converge on
+   the right operating point. The mechanism interaction was the result.
+2. **Fast and slow variables want different reward signals.** Weight updates need
+   baseline-subtracted reward for stability; permanence consolidation needs raw
+   reward to keep consolidating a correct pathway.
+3. **Three temporal retention regimes were cleanly separated.** Reservoir fading
+   memory (~5–10 steps), self-exciting assembly persistence (0.996 at delay 20),
+   and capacity-one workspace broadcast (0.724 at delay 40) form distinct regimes
+   with one-flag causal ablations.
+4. **Structural plasticity under homeostatic control works.** The reservoir
+   rewires (~790→~940 live edges) without destroying task performance.
+5. **Credit assignment, not exploration, is the learning bottleneck.** WTA credit
+   + forced exploration halved the episodes-to-mastery (875→500); noise alone
+   doesn't speed learning.
+6. **The padded CSR is a genuine engineering contribution.** It made structural
+   plasticity an addition rather than a rewrite, preserving determinism across
+   rewiring.
+
+### Honest limitations
+
+1. **Plasticity is mostly at the interface.** Reservoir weights are largely
+   fixed; local recurrent plasticity (Stage 2) does not yet create capabilities
+   the fixed reservoir lacks.
+2. **Arithmetic computation was scaffolded, not emergent.** The controller
+   composes transitions; the spiking readout alone sits at the 1/9 prior.
+3. **Tasks are small with ceiling effects.** Two-choice, small numerals, one
+   operator — many results hit 1.000, limiting what can be distinguished.
+4. **External baselines show the SNN's niches are sparsity and structural
+   forgetting, not accuracy or sample efficiency.** BPTT and ESN match or beat
+   the SNN on raw learning metrics.
+
+### Open tracks
+
+1. **Recurrent credit assignment (Stage 2).** Can WTA credit + forced exploration
+   rescue local recurrent plasticity on the context-XOR task?
+2. **Working-memory phase diagram.** Map the interaction space of self-excitation,
+   homeostasis, inhibition, delay, and size.
+3. **Structural growth controls.** Does growth produce task-specific reusable
+   motifs, and does that transfer?
+4. **Workspace stress.** Multi-item, distractors, capacity scaling.
+
+### Verdict
+
+The platform delivered what it promised: a reproducible mechanism ladder with
+controlled ablations and honest negatives. The most interesting results are the
+**interaction findings** — mechanism couplings producing behaviour neither
+mechanism alone could. The question "Can organized computation emerge from local
+reinforcement?" received a partial answer: local rules can adapt interfaces
+around a designed substrate, but spontaneous emergence of computation inside the
+recurrent network remains the open problem. That is exactly where Stage 2 sits.
