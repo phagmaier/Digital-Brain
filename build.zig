@@ -276,6 +276,26 @@ pub fn build(b: *std.Build) void {
         arithmetic_cmd.addArgs(args);
     }
 
+    // Stage 1 instrumentation: online-update cost, sparsity, forgetting curves,
+    // distribution-shift adaptation. Invoked with `zig build instrument`.
+    const instrument_exe = b.addExecutable(.{
+        .name = "instrument",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/instrument.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(instrument_exe);
+
+    const instrument_step = b.step("instrument", "Run Stage 1 instrumentation (cost/sparsity/forgetting/shift)");
+    const instrument_cmd = b.addRunArtifact(instrument_exe);
+    instrument_step.dependOn(&instrument_cmd.step);
+    instrument_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        instrument_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

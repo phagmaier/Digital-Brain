@@ -385,6 +385,48 @@ probe and the composed state vote select the answer. Do not turn this into a
 variable-duration protocol without defining a new termination/control
 experiment.
 
+## Stage 1 instrumentation — cost, sparsity, forgetting, shift
+
+Report.md Stage 1 asked to measure the niches where a local three-factor system
+might compete (not only final accuracy). The `instrument` harness
+(`zig build instrument -Doptimize=ReleaseFast`) runs four tracks on the
+two-choice association over 8 seeds and writes `instrument_cost.csv`,
+`instrument_forgetting.csv`, `instrument_shift.csv` (+ `instrument.meta.json`).
+Lesion resistance remains the load-bearing probe in `continual.zig` (Phase 6).
+
+**Online-update cost (accounting model).** Eligibility + reward touch the 256
+plastic readout edges; a dense baseline touches every live synapse each step
+(~1050). Measured local/dense ops ratio: **0.336 ± 0.007**. This is an O(·)
+accounting model (not a wall-clock microbenchmark), but it makes the claimed
+local-update niche concrete: the three-factor rule is substantially cheaper than
+full-graph-per-step credit assignment on this topology.
+
+**Sparsity.** Final-window mean firing rate **0.098 ± 0.008** spikes/neuron/step
+(soft alive band [0.005, 0.20]); fraction of neurons at ≥½ target rate
+**0.96 ± 0.03**. Activity is sparse relative to a dense continuous code, though
+nearly the whole population participates weakly under the task stimulus. Reference
+final accuracy under the same protocol: **0.980 ± 0.023**.
+
+**Forgetting curves.** Train A (full task) then force only B, probing frozen A
+accuracy every 50 block-B episodes. Consolidation uses the continual protocol
+knob (`consolidation_enabled=true` always so plastic edges join the slow clock;
+OFF zeros `consolidation_lr` only). End-of-disuse A-retest: consolidation ON
+**1.000 ± 0.000**, OFF **0.816 ± 0.167**, gap **0.184 ± 0.167**. Seed variance
+under OFF is large (some seeds stay near ceiling, others fall toward chance) — the
+time series in `instrument_forgetting.csv` is the artefact, not a single number.
+
+**Distribution-shift adaptation.** Mid-run reward mapping flip (A→0/B→1 →
+A→1/B→0) at episode 1000. Pre-shift block accuracy **0.930 ± 0.084**, first
+post-shift block **0.590 ± 0.088**, final post-shift block **0.935 ± 0.086**.
+Recovery to ≥0.70 typically within 50–350 post-shift episodes (one seed slower at
+~700). Online three-factor learning re-adapts after the flip without a separate
+optimizer.
+
+**What this does *not* claim.** No external BPTT/ESN baseline is compared here
+(Stage 1 #4b). Cost is FLOP-accounting, not wall time. Forgetting is a curve
+under B-only disuse, not a full continual-learning survival/lesion battery
+(that remains Phase 6).
+
 ## Cross-cutting engineering notes
 
 - **Every phase's mechanism is off by default.** The Phase 1 baseline run is
@@ -398,11 +440,11 @@ experiment.
   same output, so thresholds should sit safely below the observed result. Treat
   a failure as a model regression, not noise to be ignored.
 - **Experiment harnesses are separate executables** (`sweep`/`perturb`/`train`/
-  `delay`/`grow`/`continual`/`workspace`/`arithmetic`), each with tunable
-  top-level constants and a PASS/FAIL verdict. They emit CSV artefacts; plotting
-  scripts currently cover raster, homeostasis, learning, delay, structural, and
-  continual experiments. Run compute-heavy harnesses with
-  `-Doptimize=ReleaseFast`.
+  `delay`/`grow`/`continual`/`workspace`/`arithmetic`/`instrument`), each with
+  tunable top-level constants and a PASS/FAIL (or instrumentation-complete)
+  verdict. They emit CSV artefacts; plotting scripts currently cover raster,
+  homeostasis, learning, delay, structural, continual, and instrument
+  experiments. Run compute-heavy harnesses with `-Doptimize=ReleaseFast`.
 
 ## Open threads for later phases
 

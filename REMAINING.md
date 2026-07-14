@@ -40,13 +40,23 @@ Measured result (`zig build workspace -Doptimize=ReleaseFast`):
 
 Verdict: **PASS**. Docs updated (`findings.md` Phase 7, `AGENTS.md` P7).
 
-### Bookkeeping
-- Docs updated to match (`findings.md` Phase 6 + 7 + 8/9, `AGENTS.md` P6/P7/P8/P9, DEC-012/013, test-checklist) so the intentional arithmetic FAIL isn't mistaken for a regression.
-- Dynamics baseline **byte-identical** (raster/metrics/neurons/synapses unchanged); only `run_meta.json`'s hash moved from the new config field. Refreshed the golden manifest via `update-golden.sh` and restored its provenance comment. **Golden guard PASS.**
-- `zig fmt` clean, full test suite passes for prior items; workspace harness re-run PASS under ReleaseFast.
+### ✅ Item 5 — Instrumentation: cost, sparsity, forgetting, distribution-shift
+New harness `src/instrument.zig` / `zig build instrument` (8 seeds, ReleaseFast):
 
-### Remaining Stage 1 (not started)
+| track | artefact | headline (mean ± 95% CI) |
+| ----- | -------- | ------------------------ |
+| Online-update cost | `instrument_cost.csv` | local/dense ops ratio **0.336 ± 0.007** (256 plastic vs ~1049 live) |
+| Sparsity | same | firing rate **0.098 ± 0.008**; active (≥½ target) **0.96 ± 0.03** |
+| Forgetting curves | `instrument_forgetting.csv` | A-retest after B-disuse: cons ON **1.000**, OFF **0.816 ± 0.167**, gap **0.184 ± 0.167** |
+| Distribution shift | `instrument_shift.csv` | pre **0.930** → drop **0.590** → post **0.935**; re-adapts after A↔B flip |
+| Lesion resistance | *(continual.zig)* | not re-run; Phase 6 pathway lesion remains the causal probe |
+
+Plot: `uv run scripts/plot_instrument.py` → `instrument.png`. Docs: `findings.md` Stage 1 section, `AGENTS.md` commands/architecture.
+
+Note on forgetting config: both arms keep `consolidation_enabled=true` (so plastic edges join the slow prune clock, DEC-012); OFF only zeros `consolidation_lr` — matching `continual.zig`.
+
+### Remaining Stage 1
 - **#4b** Small BPTT RNN baseline (large new implementation)
-- **#5** Instrumentation: online-update cost, sparsity, forgetting curves, distribution-shift
+- *(#4a finite-state control for arithmetic already covered by `controller_only`)*
 
-I did not commit — your working tree has the Stage 1 #1–#3 changes above. Want me to continue with one of the remaining items, or commit this batch first?
+I did not commit. Want me to continue with #4b, or commit this batch first?
