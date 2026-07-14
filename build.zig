@@ -316,6 +316,27 @@ pub fn build(b: *std.Build) void {
         recurrent_cmd.addArgs(args);
     }
 
+    // Stage 3 Track A: firing×release stochasticity factorial + forced
+    // exploration + winner-take-all credit. Invoked with
+    // `zig build stochastic -Doptimize=ReleaseFast`.
+    const stochastic_exe = b.addExecutable(.{
+        .name = "stochastic",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/stochastic.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(stochastic_exe);
+
+    const stochastic_step = b.step("stochastic", "Run Stage 3 stochasticity factorial + explore/WTA -> stochastic.csv");
+    const stochastic_cmd = b.addRunArtifact(stochastic_exe);
+    stochastic_step.dependOn(&stochastic_cmd.step);
+    stochastic_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        stochastic_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

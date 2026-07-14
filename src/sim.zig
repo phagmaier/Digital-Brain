@@ -267,11 +267,16 @@ pub const Sim = struct {
                 can_fire = false;
             }
 
-            // Stochastic firing: P = sigmoid(beta * (u - theta)).
+            // Firing. Default: stochastic P = sigmoid(beta * (u - theta)).
+            // Stage 3 Track A: stochastic_firing=false -> hard threshold, no RNG.
             var fired = false;
             if (can_fire) {
-                const p = sigmoid(c.beta * (nrn.u[i] - nrn.threshold[i]));
-                fired = self.rng_firing.bernoulli(p);
+                if (c.stochastic_firing) {
+                    const p = sigmoid(c.beta * (nrn.u[i] - nrn.threshold[i]));
+                    fired = self.rng_firing.bernoulli(p);
+                } else {
+                    fired = nrn.u[i] >= nrn.threshold[i];
+                }
             }
             nrn.fired[i] = fired;
 
@@ -312,13 +317,18 @@ pub const Sim = struct {
             for (r.start..r.end) |k| {
                 if (!syn.alive[k]) continue;
 
-                // Stochastic release. INDEPENDENT of stochastic firing, so the
-                // two randomness sources can be ablated separately.
-                if (!self.rng_release.bernoulli(syn.p_release[k])) continue;
+                // Release. Stochastic by default (independent of firing so the
+                // two noise sources can be ablated separately). Stage 3 Track A:
+                // stochastic_release=false delivers every live edge with current
+                // scaled by p_release (mean-preserving deterministic release).
+                const delivered: f32 = if (c.stochastic_release) blk: {
+                    if (!self.rng_release.bernoulli(syn.p_release[k])) continue;
+                    break :blk syn.weight[k];
+                } else syn.weight[k] * syn.p_release[k];
 
                 // I_j(t + d) += d_i * w_ij
                 // Sign from the neuron, magnitude from the weight. Never mixed.
-                self.queue.schedule(self.t, syn.delay[k], syn.target[k], sign * syn.weight[k]);
+                self.queue.schedule(self.t, syn.delay[k], syn.target[k], sign * delivered);
                 m.scheduled_events += 1;
             }
         }
@@ -518,6 +528,20 @@ pub const Sim = struct {
                 nrn.pre_trace[i] += c.trace_increment;
                 nrn.post_trace[i] += c.trace_increment;
             }
+        }
+    }
+
+    /// Zero eligibility on plastic synapses whose target is outside `[lo, hi)`.
+    /// Stage 3 Track A winner-take-all credit: after the network (or a forced-
+    /// exploration policy) selects an action assembly, only synapses into that
+    /// winner keep their tags, so reward does not reinforce the losing action.
+    /// Deterministic; no RNG. Call before `applyReward`.
+    pub fn maskEligibilityToTargets(self: *Sim, lo: u32, hi: u32) void {
+        const syn = &self.network.synapses;
+        for (0..syn.n) |k| {
+            if (!syn.plastic[k] or !syn.alive[k]) continue;
+            const tgt = syn.target[k];
+            if (tgt < lo or tgt >= hi) syn.eligibility[k] = 0;
         }
     }
 
@@ -1069,6 +1093,127 @@ test "sim: release probability is statistically correct at the synapse" {
     try testing.expect(total_attempts > 10_000); // enough samples to be meaningful
     const observed = @as(f64, @floatFromInt(total_scheduled)) / @as(f64, @floatFromInt(total_attempts));
     try testing.expect(@abs(observed - 0.25) < 0.02);
+}
+
+test "sim: deterministic release is mean-preserving and always schedules" {
+    // Stage 3 Track A: stochastic_release=false delivers every live edge with
+    // current *= p_release (no Bernoulli drop). Same seed, same drive: every
+    // spike*out_edge attempt becomes a scheduled event.
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .n_neurons = 40,
+        .connection_density = 0.15,
+        .release_probability = 0.25,
+        .stochastic_release = false,
+        .stochastic_firing = false,
+        .threshold = -50.0,
+        .background_current = 3.0,
+        .refractory_steps = 0,
+        .adaptation_enabled = false,
+    };
+
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+
+    var total_scheduled: u64 = 0;
+    var total_attempts: u64 = 0;
+    for (0..200) |_| {
+        const m = s.step(null);
+        total_scheduled += m.scheduled_events;
+        for (0..s.network.neurons.n) |i| {
+            if (!s.network.neurons.fired[i]) continue;
+            const r = s.network.synapses.outgoing(@intCast(i));
+            for (r.start..r.end) |k| {
+                if (s.network.synapses.alive[k]) total_attempts += 1;
+            }
+        }
+    }
+    try testing.expect(total_attempts > 100);
+    try testing.expectEqual(total_attempts, total_scheduled);
+}
+
+test "sim: deterministic firing is a hard threshold with no RNG" {
+    // Stage 3 Track A: stochastic_firing=false fires iff u >= threshold.
+    // Same seed, two runs must match (no firing draws), and a membrane held
+    // just below threshold must never fire while one just above must.
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .n_neurons = 20,
+        .connection_density = 0.1,
+        .stochastic_firing = false,
+        .stochastic_release = false,
+        .background_current = 0.0,
+        .adaptation_enabled = false,
+        .refractory_steps = 0,
+        .threshold = 1.0,
+        .membrane_leak = 0.0, // u = I exactly each step (external dominates)
+        .homeostasis_enabled = false,
+        .release_probability = 0.0, // no synaptic coupling this step
+        .uniform_graph = true,
+    };
+    try c.validate();
+
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+
+    const ext = try gpa.alloc(f32, c.n_neurons);
+    defer gpa.free(ext);
+    @memset(ext, 0);
+    ext[0] = 0.99;
+    ext[1] = 1.0;
+    ext[2] = 1.01;
+    // rest stay silent at 0
+
+    _ = s.step(ext);
+    try testing.expect(!s.network.neurons.fired[0]); // u = 0.99 < 1
+    try testing.expect(s.network.neurons.fired[1]); // u = 1.0 >= 1
+    try testing.expect(s.network.neurons.fired[2]); // u = 1.01 >= 1
+    try testing.expect(!s.network.neurons.fired[3]);
+
+    // Reproducible under det firing: identical spike pattern across two runs.
+    var s2 = try Sim.init(gpa, c);
+    defer s2.deinit(gpa);
+    _ = s2.step(ext);
+    for (0..c.n_neurons) |i| try testing.expectEqual(s.network.neurons.fired[i], s2.network.neurons.fired[i]);
+}
+
+test "sim: WTA credit zeros eligibility outside the chosen action targets" {
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .n_neurons = 100,
+        .task_enabled = true,
+        .plasticity_enabled = true,
+        .task_group_size = 8,
+    };
+    try c.validate();
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = task_mod.layout(c);
+
+    // Tag every plastic synapse with non-zero eligibility.
+    for (0..s.network.synapses.n) |k| {
+        if (s.network.synapses.plastic[k] and s.network.synapses.alive[k]) {
+            s.network.synapses.eligibility[k] = 1.0;
+        }
+    }
+
+    s.maskEligibilityToTargets(l.action_0.lo, l.action_0.hi);
+
+    var kept: u32 = 0;
+    var cleared: u32 = 0;
+    for (0..s.network.synapses.n) |k| {
+        if (!s.network.synapses.plastic[k] or !s.network.synapses.alive[k]) continue;
+        const tgt = s.network.synapses.target[k];
+        if (tgt >= l.action_0.lo and tgt < l.action_0.hi) {
+            try testing.expectEqual(@as(f32, 1.0), s.network.synapses.eligibility[k]);
+            kept += 1;
+        } else {
+            try testing.expectEqual(@as(f32, 0.0), s.network.synapses.eligibility[k]);
+            cleared += 1;
+        }
+    }
+    try testing.expect(kept > 0);
+    try testing.expect(cleared > 0);
 }
 
 test "sim: activity neither dies nor explodes at default parameters" {

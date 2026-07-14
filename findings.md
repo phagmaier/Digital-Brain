@@ -557,3 +557,49 @@ readout cannot, under matched budgets. Next levers if pursuing the criterion:
 longer training / curriculum (identity then XOR), forced exploration or WTA action
 competition, eligibility spanning, restricted plastic subgraphs, and external
 baselines (ESN full-reservoir readout, tiny BPTT) on the same task.
+
+## Stage 3 Track A — stochasticity factorial + forced exploration + WTA credit
+
+**Implemented** as the first Stage 3 mechanism-science track (`report.md` /
+`final.md` Track A).
+
+### Mechanism
+
+- **`stochastic_firing` / `stochastic_release`** (Config, default true): det
+  firing is hard `u >= threshold` (no firing RNG); det release is mean-preserving
+  (`current = w * p_release`, no Bernoulli drop). Phase 1 baseline unchanged.
+- **`Sim.maskEligibilityToTargets`**: winner-take-all credit — zero eligibility
+  on plastic synapses outside the chosen action assembly before `applyReward`.
+- **Harness** (`zig build stochastic`): 2×2 firing×release factorial plus forced
+  annealed-ε exploration, WTA credit, and their combination on the two-choice
+  association (20 seeds, final accuracy / episodes-to-90% / takeoff).
+
+### Measured result (ReleaseFast, 20 seeds × 1500 episodes)
+
+| condition | final_acc | med ep→0.9 | mean ep→0.7 |
+|---|---:|---:|---:|
+| fire_stoch × rel_stoch (baseline) | 1.000 | 875 | 755 |
+| fire_stoch × rel_det | 0.986 | 800 | 688 |
+| fire_det × rel_stoch | 0.999 | 850 | 708 |
+| fire_det × rel_det | 0.949 | 775 | 675 |
+| stoch + forced explore (annealed) | 0.999 | 900 | 820 |
+| stoch + WTA credit | 1.000 | **725** | **588** |
+| stoch + explore + WTA | 1.000 | **500** | **420** |
+| det + explore + WTA | 1.000 | **475** | **413** |
+
+**Takeaways:**
+
+1. **Credit assignment, not stochastic exploration, is the bottleneck.** WTA
+   credit alone cuts median episodes-to-90% by ~150; combined with annealed
+   forced exploration it nearly halves takeoff (~875 → ~500). Forced exploration
+   *alone* does not speed learning — confirming Phase 3's "exploration-limited"
+   reading is really *credit-limited* once both actions can be sampled.
+2. **Firing and release noise are largely redundant for this task.** Any one of
+   the four stochasticity cells still masters the association; fully det is only
+   slightly worse asymptotically (0.95 vs 1.00) and, with explore+WTA, matches
+   the stochastic ceiling at *faster* takeoff.
+3. **Mean-preserving det release** keeps dynamics comparable (no drive doubling),
+   so the factorial is a clean noise ablation rather than a weight rescaling.
+
+Implication for Stage 2: the same WTA/explore levers should be tried on the
+context-XOR before concluding local recurrent plasticity cannot work.

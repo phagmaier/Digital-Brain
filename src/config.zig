@@ -80,6 +80,10 @@ pub const Config = struct {
     /// Stochastic synaptic release. Independent of stochastic firing, so the
     /// two randomness sources can be ablated separately.
     release_probability: f32 = 0.5,
+    /// Stage 3 Track A: when false, every live outgoing transmission is
+    /// delivered deterministically with current scaled by `p_release` (mean-
+    /// preserving ablation of release noise). Default true preserves Phase 1.
+    stochastic_release: bool = true,
 
     // -- membrane (REST-RELATIVE, DEC-002) --------------------------------
     // u_i = V_i - V_rest, so rest is exactly u = 0 and the equation leaks
@@ -100,6 +104,9 @@ pub const Config = struct {
     /// operating point. Network quietness is set by threshold, input scale, and
     /// E/I balance. "Low beta for a quiet core" is a category error.
     beta: f32 = 4.0,
+    /// Stage 3 Track A: when false, fire iff u >= threshold (hard step;
+    /// no firing RNG draw). Default true preserves Phase 1 stochastic firing.
+    stochastic_firing: bool = true,
     refractory_steps: u16 = 2,
 
     // -- adaptation -------------------------------------------------------

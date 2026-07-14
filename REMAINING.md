@@ -21,12 +21,22 @@ Accuracy 0.724 ± 0.072, gain 0.194 ± 0.072. Verdict **PASS**.
 
 ---
 
-## Stage 1 is done. Natural next work (Stage 2+)
+## Stage 2 — COMPLETE (as runnable experiment; scientific criterion open)
 
-From `report.md` / `final.md` (not started):
+`zig build recurrent -Doptimize=ReleaseFast` — context-XOR with readout / structural / recurrent / consol / lesion + representation probe. Honest FAIL of the causal-advantage bars is expected until recurrent credit assignment clears them (see `findings.md`).
 
-1. **Stage 2 flagship** — context-dependent delayed task (XOR-style) with recurrent plasticity ablations
-2. Mechanism-science tracks (stochasticity factorial, forced exploration, …)
-3. Optional: BPTT seq model on the arithmetic held-out split (only if revisiting composition in the substrate)
+---
 
-I did not commit. Say if you want a Stage 1 commit message drafted or a Stage 2 kickoff.
+## Stage 3 — Mechanism-science tracks (report.md / final.md Track A–D)
+
+### ✅ Track A (this slice) — Firing×release factorial + forced exploration + WTA credit
+- Config: `stochastic_firing`, `stochastic_release` (default true = Phase 1).
+- Det firing: hard `u >= threshold`. Det release: mean-preserving `w * p_release`.
+- `Sim.maskEligibilityToTargets` for winner-take-all credit.
+- Harness: `zig build stochastic -Doptimize=ReleaseFast` → `stochastic.csv`.
+
+### ☐ Remaining Stage 3 tracks
+1. Working-memory phase diagram (excitation × homeostasis × inhibition × delay × refractory × size)
+2. Structural growth controls (local vs global, coactivity-biased, reward/error-biased; transfer + lesions)
+3. Workspace stress (distractors, replacement, ordered recall, capacity 1/2/4)
+4. Robustness (neuron/synapse lesions, input noise, parameter drift, post-train distribution shift)
