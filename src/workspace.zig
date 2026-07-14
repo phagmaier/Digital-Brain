@@ -9,6 +9,11 @@
 //! accuracy improvement over the switch-off ablation is causal evidence for the
 //! workspace mechanism rather than a claim about an unrestricted memory store.
 //!
+//! Protocol (Stage 1 / report.md § Stage 1): 20 paired seeds, same seed run under
+//! both conditions, with mean and a 95% normal confidence interval over the seed
+//! sample. The verdict is judged on the CI *lower* bounds so a noisy sample
+//! cannot pass on the point estimate alone (same standard as continual.zig).
+//!
 //! Produces workspace.csv and a PASS/FAIL verdict. Run with:
 //!   zig build workspace -Doptimize=ReleaseFast
 
@@ -19,7 +24,12 @@ const task = @import("task.zig");
 const rng = @import("rng.zig");
 const provenance = @import("provenance.zig");
 
-const seeds = [_]u64{ 1, 2, 3, 4 };
+const n_seeds = 20; // report.md Stage 1: 20–50 paired seeds (match continual)
+const seeds: [n_seeds]u64 = blk: {
+    var s: [n_seeds]u64 = undefined;
+    for (0..n_seeds) |i| s[i] = @as(u64, i) + 1;
+    break :blk s;
+};
 const n_episodes: u32 = 1200;
 const stim_steps: u32 = 30;
 const delay_steps: u32 = 40;
@@ -32,6 +42,7 @@ const conditions = [_]Condition{
     .{ .name = "ablated", .workspace_enabled = false },
 };
 
+// Verdict thresholds (judged on 95% CI lower bound over the paired seed sample).
 const pass_workspace_mean: f64 = 0.65;
 const pass_gap: f64 = 0.10;
 
@@ -127,6 +138,27 @@ fn trainOne(gpa: std.mem.Allocator, seed: u64, workspace_enabled: bool) !Result 
     };
 }
 
+/// Mean and 95% (normal-approx) confidence half-width of a sample. With < 2
+/// samples the half-width is undefined and reported as NaN.
+const Stat = struct {
+    mean: f64,
+    ci_half: f64,
+    n: u32,
+};
+
+fn summarize(xs: []const f64) Stat {
+    if (xs.len == 0) return .{ .mean = 0, .ci_half = std.math.nan(f64), .n = 0 };
+    var sum: f64 = 0;
+    for (xs) |x| sum += x;
+    const mean = sum / @as(f64, @floatFromInt(xs.len));
+    if (xs.len < 2) return .{ .mean = mean, .ci_half = std.math.nan(f64), .n = @intCast(xs.len) };
+    var ss: f64 = 0;
+    for (xs) |x| ss += (x - mean) * (x - mean);
+    const sd = @sqrt(ss / @as(f64, @floatFromInt(xs.len - 1)));
+    const ci_half = 1.96 * sd / @sqrt(@as(f64, @floatFromInt(xs.len)));
+    return .{ .mean = mean, .ci_half = ci_half, .n = @intCast(xs.len) };
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -138,29 +170,47 @@ pub fn main(init: std.process.Init) !void {
     defer csv.deinit();
     try csv.writer.print("condition,seed,delay,accuracy,mean_delay_workspace_state\n", .{});
 
-    var workspace_mean: f64 = 0;
-    var ablated_mean: f64 = 0;
-    try out_stdout.print("\n-- Phase 7 workspace delayed-association ablation -----------\n", .{});
-    for (conditions) |condition| {
-        var mean: f64 = 0;
-        try out_stdout.print("  {s}:\n", .{condition.name});
-        for (seeds) |seed| {
-            const r = try trainOne(gpa, seed, condition.workspace_enabled);
-            try csv.writer.print("{s},{d},{d},{d:.4},{d:.5}\n", .{
-                condition.name, seed, delay_steps, r.accuracy, r.mean_delay_workspace_state,
-            });
-            try out_stdout.print("    seed {d}: accuracy {d:.3}, delay workspace {d:.3}\n", .{
-                seed, r.accuracy, r.mean_delay_workspace_state,
-            });
-            mean += r.accuracy;
-        }
-        mean /= @as(f64, @floatFromInt(seeds.len));
-        try out_stdout.print("    mean accuracy {d:.3}\n", .{mean});
-        if (condition.workspace_enabled) workspace_mean = mean else ablated_mean = mean;
+    // Paired per-seed samples (same seed under both conditions).
+    var workspace_accs: [n_seeds]f64 = undefined;
+    var ablated_accs: [n_seeds]f64 = undefined;
+    var gaps: [n_seeds]f64 = undefined;
+    var workspace_states: [n_seeds]f64 = undefined;
+    var ablated_states: [n_seeds]f64 = undefined;
+
+    try out_stdout.print(
+        "\n-- Phase 7 workspace delayed-association ablation -----------\n" ++
+            "   {d} paired seeds, delay {d}, final window {d}\n\n",
+        .{ n_seeds, delay_steps, final_window },
+    );
+    try out_stdout.print("  {s:>4}  {s:>10}  {s:>10}  {s:>8}  {s:>12}  {s:>12}\n", .{
+        "seed", "workspace", "ablated", "gap", "ws state", "abl state",
+    });
+
+    for (seeds, 0..) |seed, i| {
+        const ws = try trainOne(gpa, seed, true);
+        const ab = try trainOne(gpa, seed, false);
+
+        workspace_accs[i] = ws.accuracy;
+        ablated_accs[i] = ab.accuracy;
+        gaps[i] = ws.accuracy - ab.accuracy;
+        workspace_states[i] = ws.mean_delay_workspace_state;
+        ablated_states[i] = ab.mean_delay_workspace_state;
+
+        try csv.writer.print("{s},{d},{d},{d:.4},{d:.5}\n", .{
+            "workspace", seed, delay_steps, ws.accuracy, ws.mean_delay_workspace_state,
+        });
+        try csv.writer.print("{s},{d},{d},{d:.4},{d:.5}\n", .{
+            "ablated", seed, delay_steps, ab.accuracy, ab.mean_delay_workspace_state,
+        });
+        try out_stdout.print("  {d:>4}  {d:>10.3}  {d:>10.3}  {d:>8.3}  {d:>12.3}  {d:>12.3}\n", .{
+            seed, ws.accuracy, ab.accuracy, gaps[i], ws.mean_delay_workspace_state, ab.mean_delay_workspace_state,
+        });
     }
+
     try writeAtomic(io, "workspace.csv", csv.written());
     try provenance.write(io, gpa, "workspace.meta.json", "workspace_broadcast", .{
         .seeds = seeds,
+        .n_seeds = n_seeds,
         .workspace_config = baseConfig(seeds[0], true),
         .ablated_config = baseConfig(seeds[0], false),
         .conditions = conditions,
@@ -171,18 +221,59 @@ pub fn main(init: std.process.Init) !void {
         .final_window = final_window,
         .pass_workspace_mean = pass_workspace_mean,
         .pass_gap = pass_gap,
+        .ci_level = 0.95,
+        .verdict_on = "ci_lower_bound",
     });
 
-    const gap = workspace_mean - ablated_mean;
-    const pass = workspace_mean >= pass_workspace_mean and gap >= pass_gap;
+    const ws_stat = summarize(&workspace_accs);
+    const ab_stat = summarize(&ablated_accs);
+    const gap_stat = summarize(&gaps);
+    const ws_state_stat = summarize(&workspace_states);
+    const ab_state_stat = summarize(&ablated_states);
+
+    // Verdict: both faces clear their margin on the LOWER confidence bound.
+    const enough = ws_stat.n >= 2;
+    const workspace_ok = (ws_stat.mean - ws_stat.ci_half) >= pass_workspace_mean;
+    const gap_ok = (gap_stat.mean - gap_stat.ci_half) >= pass_gap;
+    const pass = enough and workspace_ok and gap_ok;
+
     try out_stdout.print(
-        "\n  exit criterion -- workspace at delay {d} versus an otherwise-identical ablation:\n" ++
-            "    workspace mean    {d:.3}   (need >= {d:.2})\n" ++
-            "    ablated mean      {d:.3}\n" ++
-            "    causal gain       {d:.3}   (need >= {d:.2})\n" ++
-            "  VERDICT: {s}\n\n  wrote workspace.csv\n\n",
-        .{ delay_steps, workspace_mean, pass_workspace_mean, ablated_mean, gap, pass_gap, if (pass) "PASS -- bottlenecked broadcast improves delayed performance." else "FAIL -- inspect workspace.csv." },
-    );
+        \\
+        \\  paired seeds: {d}
+        \\
+        \\  exit criterion (both must hold, judged on 95% CI lower bound):
+        \\    1. WORKSPACE MEAN   accuracy with workspace on:
+        \\                        {d:.3} ± {d:.3}   (need lower bound >= {d:.2})
+        \\    2. CAUSAL GAIN      workspace − ablated accuracy (paired):
+        \\                        {d:.3} ± {d:.3}   (need lower bound >= {d:.2})
+        \\
+        \\  ablated mean accuracy {d:.3} ± {d:.3}
+        \\  delay workspace state  on {d:.3} ± {d:.3}   off {d:.3} ± {d:.3}
+        \\  VERDICT: {s}
+        \\
+        \\  wrote workspace.csv
+        \\
+    , .{
+        n_seeds,
+        ws_stat.mean,
+        ws_stat.ci_half,
+        pass_workspace_mean,
+        gap_stat.mean,
+        gap_stat.ci_half,
+        pass_gap,
+        ab_stat.mean,
+        ab_stat.ci_half,
+        ws_state_stat.mean,
+        ws_state_stat.ci_half,
+        ab_state_stat.mean,
+        ab_state_stat.ci_half,
+        if (pass)
+            "PASS -- bottlenecked broadcast improves delayed performance."
+        else if (!enough)
+            "INCONCLUSIVE -- too few seeds; inspect the table."
+        else
+            "FAIL -- inspect workspace.csv.",
+    });
     try stdout.interface.flush();
 }
 

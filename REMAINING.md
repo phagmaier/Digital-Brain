@@ -1,5 +1,3 @@
-Both Stage 1 items I've taken on are complete, tested, and documented. Here's the summary.
-
 ## Stage 1 progress
 
 ### ✅ Item 1 — Controller-ablation matrix (report §1, the "immediate priority")
@@ -24,14 +22,31 @@ Reworked `continual.zig` with all four requested improvements, plus a new config
 
 Verdict: **PASS** (survival 0.951 ± 0.045; less-forgetting 0.282 ± 0.119).
 
+### ✅ Item 3 — Expand workspace to 20 paired seeds + CIs
+Expanded `workspace.zig` from 4 seeds to **20 paired seeds** with the same stats protocol as `continual.zig`:
+
+- Same seed under both `workspace` / `ablated` conditions (paired gap)
+- Mean ± 95% normal CI over the seed sample
+- Verdict judged on the CI **lower bound** for both faces of the criterion
+
+Measured result (`zig build workspace -Doptimize=ReleaseFast`):
+
+| metric | mean ± 95% CI half | lower bound | threshold |
+| ------ | ------------------ | ----------- | --------- |
+| workspace accuracy | **0.724 ± 0.072** | 0.652 | ≥ 0.65 |
+| ablated accuracy | 0.530 ± 0.022 | — | (near chance) |
+| paired causal gain | **0.194 ± 0.072** | 0.122 | ≥ 0.10 |
+| delay workspace state (on / off) | 0.957 ± 0.018 / 0.000 | — | — |
+
+Verdict: **PASS**. Docs updated (`findings.md` Phase 7, `AGENTS.md` P7).
+
 ### Bookkeeping
-- Docs updated to match (`findings.md` Phase 6 + 8/9, `AGENTS.md` P6/P8/P9, DEC-012/013, test-checklist) so the intentional arithmetic FAIL isn't mistaken for a regression.
+- Docs updated to match (`findings.md` Phase 6 + 7 + 8/9, `AGENTS.md` P6/P7/P8/P9, DEC-012/013, test-checklist) so the intentional arithmetic FAIL isn't mistaken for a regression.
 - Dynamics baseline **byte-identical** (raster/metrics/neurons/synapses unchanged); only `run_meta.json`'s hash moved from the new config field. Refreshed the golden manifest via `update-golden.sh` and restored its provenance comment. **Golden guard PASS.**
-- `zig fmt` clean, full test suite passes.
+- `zig fmt` clean, full test suite passes for prior items; workspace harness re-run PASS under ReleaseFast.
 
 ### Remaining Stage 1 (not started)
-- **#3** Expand *workspace* to 20–50 seeds + CIs (continual is already done at 20)
 - **#4b** Small BPTT RNN baseline (large new implementation)
 - **#5** Instrumentation: online-update cost, sparsity, forgetting curves, distribution-shift
 
-I did not commit — your working tree is staged-clean with the changes above. Want me to continue with one of the remaining items, or commit this batch first?
+I did not commit — your working tree has the Stage 1 #1–#3 changes above. Want me to continue with one of the remaining items, or commit this batch first?

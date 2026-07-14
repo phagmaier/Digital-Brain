@@ -279,12 +279,14 @@ correlate with a surviving band; it builds the pathway the behaviour depends on.
 **A capacity-one workspace produces a causal long-delay benefit, not just an
 extra activity trace.** The controlled `workspace` harness removes the Phase 4
 self-exciting memory assembly, holds the stimulus over a 40-step delay, and
-changes only `workspace_enabled`. Across seeds 1–4, the enabled condition reached
-**0.705** mean accuracy versus **0.491** for the otherwise-identical ablation: a
-**+0.214** causal gain (criterion: enabled ≥ 0.65 and gain ≥ 0.10). The ablated
-workspace state was exactly 0 by construction; the enabled delay state averaged
-~0.94–0.99. This is the important result: a bottlenecked winner can retain and
-broadcast task-relevant state after the stimulus is gone.
+changes only `workspace_enabled`. Across **20 paired seeds** (Stage 1 / report.md),
+the enabled condition reached **0.724 ± 0.072** mean accuracy versus **0.530 ± 0.022**
+for the otherwise-identical ablation: a **+0.194 ± 0.072** paired causal gain
+(95% normal CIs; criterion judged on the CI *lower* bound: enabled ≥ 0.65 and
+gain ≥ 0.10 — both clear). The ablated workspace state was exactly 0 by
+construction; the enabled delay state averaged **0.957 ± 0.018**. This is the
+important result: a bottlenecked winner can retain and broadcast task-relevant
+state after the stimulus is gone.
 
 **The workspace is intentionally a competition, not a second unconstrained
 reservoir.** Candidate evidence is collected from the task assemblies, an
@@ -295,10 +297,11 @@ on/off ablation as a one-flag comparison; adding a second persistence mechanism
 would make the causal interpretation ambiguous.
 
 **Mean performance hides seed variance, so retain both the per-seed CSV and the
-mean/gap criterion.** The enabled seeds were 0.484–1.000 while the ablated
-condition stayed near chance (0.472–0.532). The pass criterion therefore uses a
-multi-seed mean and an explicit ablation gap, not a claim that every seed must
-solve the task perfectly.
+CI lower-bound criterion.** Enabled seeds still span ~0.48–1.00 while ablated
+stays near chance (~0.47–0.62). A few seeds (e.g. 2, 10, 16) show essentially
+no gain; the pass criterion therefore uses the multi-seed mean *and* an explicit
+paired ablation gap, each judged on the 95% CI lower bound — not a claim that
+every seed solves the task perfectly.
 
 ## Phase 8 — symbolic arithmetic curriculum
 
