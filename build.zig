@@ -296,6 +296,26 @@ pub fn build(b: *std.Build) void {
         instrument_cmd.addArgs(args);
     }
 
+    // Stage 2: recurrent plasticity on a context-dependent delayed XOR task.
+    // Invoked with `zig build recurrent -Doptimize=ReleaseFast`.
+    const recurrent_exe = b.addExecutable(.{
+        .name = "recurrent",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/recurrent.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(recurrent_exe);
+
+    const recurrent_step = b.step("recurrent", "Run Stage 2 recurrent-plasticity context-XOR experiment -> recurrent.csv");
+    const recurrent_cmd = b.addRunArtifact(recurrent_exe);
+    recurrent_step.dependOn(&recurrent_cmd.step);
+    recurrent_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        recurrent_cmd.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

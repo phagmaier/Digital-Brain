@@ -524,3 +524,36 @@ Artefacts: `baseline.csv`, `baseline_curves.csv`, `baseline.meta.json`,
   the held split with the controller removed, over larger ranges and
   independently held results/operators. This is the entry point to Stage 2's
   context-dependent delayed task.
+
+## Stage 2 — recurrent plasticity on a context-dependent delayed task (DEC-014)
+
+**Implemented** as the flagship next experiment from `report.md` / `final.md` §7.
+
+### Mechanism
+
+- **`context_task.zig`**: six-group layout (context_x/y, cue_a/b, action_0/1) and
+  delayed XOR mapping (X,A)→0, (X,B)→1, (Y,A)→1, (Y,B)→0.
+- **Graph** (`net.zig`): context-group self-excitation (`context_hold_weight`);
+  plastic stimulus→action readout from all four assemblies (still not a linear
+  shortcut — XOR is not linearly separable in those rates); optional
+  `reservoir_plasticity_enabled` marks reservoir (and grown) edges plastic.
+- **Slow clock consistency**: when a structural edge is also plastic, permanence
+  is reward-driven (not co-activity), matching DEC-012.
+- **Harness** (`zig build recurrent`): paired multi-seed comparison of
+  `readout_only` / `structural_only` / `recurrent` / `recurrent_consol`, post-train
+  lesion of learned reservoir weights (restore to post-build init), and a
+  context-conditioned reservoir rate probe (`recurrent_repr.csv`). Verdict on
+  95% CI lower bounds: recurrent accuracy, gap vs readout-only, gap vs lesion,
+  and separability gap.
+
+### Initial scientific result
+
+First ReleaseFast multi-seed run sits near chance for every condition (no reliable
+recurrent advantage, no lesion collapse). That is an **honest FAIL of the Stage 2
+exit criterion**, not a mechanism regression — analogous to P8's `learned_readout`
+FAIL. Mechanism unit tests pass; the open problem is whether local three-factor
+credit assignment inside the reservoir can create a capability the fixed-reservoir
+readout cannot, under matched budgets. Next levers if pursuing the criterion:
+longer training / curriculum (identity then XOR), forced exploration or WTA action
+competition, eligibility spanning, restricted plastic subgraphs, and external
+baselines (ESN full-reservoir readout, tiny BPTT) on the same task.

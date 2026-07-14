@@ -14,6 +14,7 @@ const std = @import("std");
 const cfg = @import("config.zig");
 const rng = @import("rng.zig");
 const task = @import("task.zig");
+const context_task = @import("context_task.zig");
 const arithmetic = @import("arithmetic.zig");
 
 const Allocator = std.mem.Allocator;
@@ -23,7 +24,10 @@ pub const NeuronId = u32;
 pub const SynapseId = u32;
 
 /// What kind of edge the builder is emitting. Build-time only; at runtime the
-/// distinction survives as `plastic[]` (readout) and the weight values.
+/// distinction survives as `plastic[]` / `structural[]` and the weight values.
+/// `recurrent` covers Phase 4 input-group self-excitation AND Stage 2 context
+/// hold (both fixed, non-plastic, non-structural). `readout` covers Phase 3
+/// input→action and Stage 2 cue→action plastic edges.
 const EdgeKind = enum { reservoir, recurrent, readout, arithmetic_readout };
 
 // ---------------------------------------------------------------------------
@@ -285,6 +289,7 @@ pub const Network = struct {
         var edge_kind = try std.ArrayList(EdgeKind).initCapacity(gpa, n * 8);
         defer edge_kind.deinit(gpa);
         const task_layout = task.layout(c);
+        const context_layout = context_task.layout(c);
         const arithmetic_layout = arithmetic.layout(c);
 
         const two_sigma_sq = 2.0 * c.spatial_sigma * c.spatial_sigma;
@@ -356,6 +361,38 @@ pub const Network = struct {
                     try src.append(gpa, @intCast(i));
                     try dst.append(gpa, a);
                     try edge_kind.append(gpa, .readout);
+                }
+            }
+
+            // Stage 2 context-dependent task (DEC-014). Same source-ordered,
+            // RNG-free emission as Phase 3/4 so the reservoir stream is unchanged.
+            // Context hold: fixed self-excitation within each CONTEXT group only.
+            // Plastic readout: every stimulus assembly (context + cue) -> actions.
+            // A pure linear readout of those four assemblies cannot implement the
+            // XOR mapping (not linearly separable), so the direct path is not a
+            // sufficient "shortcut"; the Stage 2 claim is about recurrent state.
+            if (c.context_task_enabled) {
+                const id: u32 = @intCast(i);
+                if (c.context_hold_weight > 0 and context_layout.isContext(id)) {
+                    const grp = if (context_layout.context_x.contains(id))
+                        context_layout.context_x
+                    else
+                        context_layout.context_y;
+                    var k2: u32 = grp.lo;
+                    while (k2 < grp.hi) : (k2 += 1) {
+                        if (k2 == id) continue;
+                        try src.append(gpa, id);
+                        try dst.append(gpa, k2);
+                        try edge_kind.append(gpa, .recurrent);
+                    }
+                }
+                if (context_layout.isStimulus(id)) {
+                    var a: u32 = context_layout.action_0.lo;
+                    while (a < context_layout.action_1.hi) : (a += 1) {
+                        try src.append(gpa, id);
+                        try dst.append(gpa, a);
+                        try edge_kind.append(gpa, .readout);
+                    }
                 }
             }
 
@@ -440,12 +477,16 @@ pub const Network = struct {
                         syn.structural[w] = false; // readout is functional, never pruned
                     },
                     .recurrent => {
-                        // Fixed input-group self-excitation (Phase 4 working memory).
-                        syn.weight[w] = c.task_recurrent_weight;
+                        // Fixed self-excitation: Phase 4 input-group WM, or Stage 2
+                        // context-group hold. Weight comes from the active layout.
+                        syn.weight[w] = if (c.context_task_enabled)
+                            c.context_hold_weight
+                        else
+                            c.task_recurrent_weight;
                         syn.p_release[w] = c.task_ia_p_release;
                         syn.delay[w] = c.min_delay;
                         syn.plastic[w] = false;
-                        syn.structural[w] = false; // working memory, never pruned
+                        syn.structural[w] = false; // functional hold, never pruned
                     },
                     .arithmetic_readout => {
                         // Phase 8 trainable symbol-sequence readout. Its source
@@ -464,7 +505,9 @@ pub const Network = struct {
                         };
                         syn.p_release[w] = c.release_probability;
                         syn.delay[w] = @intCast(c.min_delay + r.below(delay_span));
-                        syn.plastic[w] = false; // the random reservoir is fixed; only readout edges learn
+                        // DEC-008 default: fixed reservoir. Stage 2 (DEC-014) can
+                        // open local three-factor learning on reservoir edges.
+                        syn.plastic[w] = c.plasticity_enabled and c.reservoir_plasticity_enabled;
                         syn.structural[w] = true; // reservoir edges are what growth/pruning manage
                     },
                 }
@@ -829,4 +872,109 @@ test "net: arithmetic symbols get plastic answer readout without perturbing rese
         l.symbolGroupCount() * c.arithmetic_group_size * l.actionCount() * c.arithmetic_group_size,
         readout_count,
     );
+}
+
+test "net: context task adds stimulus→action plastic readout and context hold" {
+    const gpa = testing.allocator;
+    const g: u32 = 6;
+    const c = cfg.Config{
+        .master_seed = 11,
+        .context_task_enabled = true,
+        .plasticity_enabled = true,
+        .context_task_group_size = g,
+        .context_hold_weight = 0.5,
+    };
+    var net = try Network.build(gpa, c);
+    defer net.deinit(gpa);
+    const l = context_task.layout(c);
+    const s = net.synapses;
+
+    var n_readout: u32 = 0;
+    var n_hold: u32 = 0;
+    var n_context_readout: u32 = 0;
+    var n_cue_readout: u32 = 0;
+    for (0..s.n) |k| {
+        if (!s.alive[k]) continue;
+        const src = s.source[k];
+        const dst = s.target[k];
+        if (s.plastic[k] and !s.structural[k]) {
+            n_readout += 1;
+            try testing.expect(l.isStimulus(src));
+            try testing.expect(l.isAction(dst));
+            try testing.expectEqual(c.task_ia_weight_init, s.weight[k]);
+            if (l.isContext(src)) n_context_readout += 1;
+            if (l.isCue(src)) n_cue_readout += 1;
+        }
+        if (!s.plastic[k] and !s.structural[k] and s.weight[k] == c.context_hold_weight) {
+            n_hold += 1;
+            try testing.expect(l.isContext(src));
+            try testing.expect(l.isContext(dst));
+            try testing.expect(src != dst);
+        }
+    }
+    // Four stimulus groups × two action groups, all-to-all.
+    try testing.expectEqual(4 * g * 2 * g, n_readout);
+    try testing.expectEqual(2 * g * 2 * g, n_context_readout);
+    try testing.expectEqual(2 * g * 2 * g, n_cue_readout);
+    // Two context groups, each all-to-all excluding self: 2 * g * (g-1).
+    try testing.expectEqual(2 * g * (g - 1), n_hold);
+}
+
+test "net: enabling the context task does not perturb the reservoir" {
+    const gpa = testing.allocator;
+    const seed: u64 = 13;
+    var plain = try Network.build(gpa, .{ .master_seed = seed });
+    defer plain.deinit(gpa);
+    var with_ctx = try Network.build(gpa, .{
+        .master_seed = seed,
+        .context_task_enabled = true,
+        .plasticity_enabled = true,
+        .context_task_group_size = 6,
+        .context_hold_weight = 0.5,
+    });
+    defer with_ctx.deinit(gpa);
+
+    var pk: usize = 0;
+    for (0..with_ctx.synapses.n) |k| {
+        if (!with_ctx.synapses.structural[k] or !with_ctx.synapses.alive[k]) continue;
+        try testing.expectEqual(plain.synapses.source[pk], with_ctx.synapses.source[k]);
+        try testing.expectEqual(plain.synapses.target[pk], with_ctx.synapses.target[k]);
+        try testing.expectEqual(plain.synapses.weight[pk], with_ctx.synapses.weight[k]);
+        try testing.expectEqual(plain.synapses.delay[pk], with_ctx.synapses.delay[k]);
+        pk += 1;
+    }
+    try testing.expectEqual(plain.synapses.n, @as(u32, @intCast(pk)));
+}
+
+test "net: reservoir_plasticity_enabled marks reservoir edges plastic" {
+    const gpa = testing.allocator;
+    var off = try Network.build(gpa, .{
+        .master_seed = 3,
+        .plasticity_enabled = true,
+        .reservoir_plasticity_enabled = false,
+    });
+    defer off.deinit(gpa);
+    var on = try Network.build(gpa, .{
+        .master_seed = 3,
+        .plasticity_enabled = true,
+        .reservoir_plasticity_enabled = true,
+    });
+    defer on.deinit(gpa);
+
+    var n_plastic_off: u32 = 0;
+    var n_plastic_on: u32 = 0;
+    var n_structural: u32 = 0;
+    for (0..off.synapses.n) |k| {
+        if (off.synapses.plastic[k]) n_plastic_off += 1;
+    }
+    for (0..on.synapses.n) |k| {
+        if (on.synapses.plastic[k]) n_plastic_on += 1;
+        if (on.synapses.structural[k] and on.synapses.alive[k]) {
+            n_structural += 1;
+            try testing.expect(on.synapses.plastic[k]);
+        }
+    }
+    try testing.expectEqual(@as(u32, 0), n_plastic_off);
+    try testing.expect(n_plastic_on > 0);
+    try testing.expectEqual(n_structural, n_plastic_on);
 }

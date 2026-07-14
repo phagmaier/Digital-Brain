@@ -619,11 +619,14 @@ pub const Sim = struct {
             if (!manages(c, syn, k)) continue;
             syn.age[k] +|= 1;
 
-            // Activity term applies to reservoir edges only. Plastic edges get
-            // their positive drive from reward (applyReward), not from mere
-            // co-activity -- §8.4/§8.3: don't consolidate on activity alone.
+            // Activity term applies to non-plastic reservoir edges only. Plastic
+            // edges (readout OR Stage 2 plastic reservoir) get their positive
+            // drive from reward (applyReward), not from mere co-activity —
+            // §8.4/§8.3 / DEC-012: don't consolidate on activity alone. When
+            // reservoir_plasticity_enabled makes structural edges plastic, they
+            // follow the plastic (reward) permanence path, not the activity path.
             var gain: f32 = 0;
-            if (syn.structural[k]) {
+            if (syn.structural[k] and !syn.plastic[k]) {
                 const a_pre = nrn.rate_ema[syn.source[k]] / target;
                 const a_post = nrn.rate_ema[syn.target[k]] / target;
                 const coact = std.math.clamp(a_pre * a_post, 0.0, coact_max);
@@ -730,7 +733,8 @@ pub const Sim = struct {
                 syn.permanence[k] = c.grow_permanence_init;
                 syn.age[k] = 0;
                 syn.structural[k] = true;
-                syn.plastic[k] = false;
+                // Grown edges inherit the reservoir's plasticity regime (DEC-014).
+                syn.plastic[k] = c.plasticity_enabled and c.reservoir_plasticity_enabled;
                 syn.alive[k] = true;
                 sm.grown += 1;
             }
@@ -2105,4 +2109,88 @@ test "learning: consolidated pathways survive disuse better than tentative ones 
 
     // Consolidated pathways survive markedly better than tentative ones.
     try testing.expect(worst_gap > 0.3);
+}
+
+// ---- Stage 2: reservoir plasticity on a context-dependent task (DEC-014) ----
+
+test "reservoir plasticity: reward moves plastic reservoir weights; fixed reservoir stays put" {
+    const gpa = testing.allocator;
+    const c = cfg.Config{
+        .master_seed = 5,
+        .context_task_enabled = true,
+        .plasticity_enabled = true,
+        .reservoir_plasticity_enabled = true,
+        .context_task_group_size = 6,
+        .context_hold_weight = 0.5,
+        .background_current = 0.6,
+    };
+    var s = try Sim.init(gpa, c);
+    defer s.deinit(gpa);
+    const l = @import("context_task.zig").layout(c);
+    const ext = try gpa.alloc(f32, c.n_neurons);
+    defer gpa.free(ext);
+
+    // Drive context then cue so co-active paths through the reservoir build
+    // eligibility on plastic structural edges.
+    l.fillContext(.x, c.task_input_current, ext);
+    for (0..30) |_| _ = s.step(ext);
+    l.fillCue(.a, c.task_input_current, ext);
+    for (0..30) |_| _ = s.step(ext);
+
+    var max_e_structural: f32 = 0;
+    for (0..s.network.synapses.n) |k| {
+        if (s.network.synapses.structural[k] and s.network.synapses.plastic[k] and s.network.synapses.alive[k])
+            max_e_structural = @max(max_e_structural, s.network.synapses.eligibility[k]);
+    }
+    try testing.expect(max_e_structural > 0);
+
+    const before = try gpa.dupe(f32, s.network.synapses.weight);
+    defer gpa.free(before);
+    s.applyReward(1.0);
+
+    var reservoir_moved = false;
+    for (0..s.network.synapses.n) |k| {
+        if (!s.network.synapses.alive[k]) continue;
+        if (s.network.synapses.structural[k] and s.network.synapses.plastic[k]) {
+            if (s.network.synapses.eligibility[k] > 0 and s.network.synapses.weight[k] > before[k])
+                reservoir_moved = true;
+        }
+    }
+    try testing.expect(reservoir_moved);
+
+    // Control: with reservoir plasticity OFF the structural weights never move.
+    var fixed = try Sim.init(gpa, .{
+        .master_seed = 5,
+        .context_task_enabled = true,
+        .plasticity_enabled = true,
+        .reservoir_plasticity_enabled = false,
+        .context_task_group_size = 6,
+        .context_hold_weight = 0.5,
+        .background_current = 0.6,
+    });
+    defer fixed.deinit(gpa);
+    l.fillContext(.x, c.task_input_current, ext);
+    for (0..30) |_| _ = fixed.step(ext);
+    l.fillCue(.a, c.task_input_current, ext);
+    for (0..30) |_| _ = fixed.step(ext);
+    const before_fixed = try gpa.dupe(f32, fixed.network.synapses.weight);
+    defer gpa.free(before_fixed);
+    fixed.applyReward(1.0);
+    for (0..fixed.network.synapses.n) |k| {
+        if (fixed.network.synapses.structural[k])
+            try testing.expectEqual(before_fixed[k], fixed.network.synapses.weight[k]);
+    }
+}
+
+test "context task: XOR mapping is not linearly solved by cue readout alone at init" {
+    // Sanity: a fresh network with only plastic cue→action edges and no reservoir
+    // plasticity is at chance on the cross-coupling — the Stage 2 baseline that
+    // recurrent plasticity has to beat. Not a training test; just the mapping +
+    // readout symmetry (all cue→action weights equal at init).
+    const ctx = @import("context_task.zig");
+    const l = ctx.layout(.{ .context_task_group_size = 6 });
+    try testing.expectEqual(@as(u1, 0), l.correctAction(.x, .a));
+    try testing.expectEqual(@as(u1, 1), l.correctAction(.y, .a)); // same cue, opposite action
+    try testing.expectEqual(l.correctAction(.x, .a), l.correctAction(.y, .b));
+    try testing.expectEqual(l.correctAction(.x, .b), l.correctAction(.y, .a));
 }

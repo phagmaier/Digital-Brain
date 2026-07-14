@@ -207,6 +207,27 @@ pub const Config = struct {
     /// the stimulus after a delay. 0 disables it (the Phase 3 immediate regime).
     task_recurrent_weight: f32 = 0.0,
 
+    // -- Stage 2: context-dependent delayed mapping + reservoir plasticity --
+    // Delayed XOR-style task (report.md Stage 2 / final.md §7):
+    //   context X + cue A → 0,  X + B → 1,  Y + A → 1,  Y + B → 0
+    // Context and cue are presented at separate times. Plastic stimulus→action
+    // readout edges go from both context and cue assemblies (still not a linear
+    // shortcut: the XOR mapping is not linearly separable in those four rates);
+    // context assemblies also carry fixed self-excitation (`context_hold_weight`)
+    // so the context can bridge the inter-stimulus delay. The flagship comparison
+    // is fixed-reservoir + plastic readout vs locally plastic reservoir edges
+    // (DEC-014). OFF by default so the Phase 1 baseline is unchanged.
+    context_task_enabled: bool = false,
+    context_task_group_size: u32 = 6,
+    /// Fixed all-to-all self-excitation WITHIN each context group (not the cue
+    /// groups). 0 disables the context hold.
+    context_hold_weight: f32 = 0.0,
+    /// When true (and plasticity_enabled), reservoir and grown edges are plastic:
+    /// they accumulate eligibility and take the three-factor reward update. Task
+    /// readout edges remain plastic independently. OFF by default (DEC-008's
+    /// fixed-reservoir regime).
+    reservoir_plasticity_enabled: bool = false,
+
     // -- structural plasticity (Phase 5, DEC-011) --------------------------
     // Local random connection search: the reservoir graph GROWS and PRUNES
     // connections over training instead of staying fixed. OFF by default so the
@@ -448,7 +469,9 @@ pub const Config = struct {
             return error.NegativeTaskCurrentOrWeight;
         if (self.task_enabled and self.weight_max_plastic < self.task_ia_weight_init)
             return error.PlasticWeightMaxBelowInit;
-        if (self.task_enabled and self.arithmetic_enabled)
+        if ((self.task_enabled and self.arithmetic_enabled) or
+            (self.task_enabled and self.context_task_enabled) or
+            (self.arithmetic_enabled and self.context_task_enabled))
             return error.OverlappingTaskLayouts;
         if (self.task_enabled) {
             // The four task groups are carved from the excitatory population and
@@ -457,6 +480,19 @@ pub const Config = struct {
             if (self.task_group_size == 0) return error.EmptyTaskGroup;
             if (4 * self.task_group_size > n_exc) return error.TaskGroupsExceedExcitatory;
         }
+
+        // Stage 2 context-dependent task: six groups from low excitatory IDs.
+        if (self.context_task_enabled) {
+            if (self.context_task_group_size == 0) return error.EmptyContextTaskGroup;
+            if (6 * self.context_task_group_size > self.nExcitatory())
+                return error.ContextTaskGroupsExceedExcitatory;
+            if (!isNonNegative(self.context_hold_weight))
+                return error.NegativeContextHoldWeight;
+            if (self.weight_max_plastic < self.task_ia_weight_init)
+                return error.PlasticWeightMaxBelowInit;
+        }
+        if (self.reservoir_plasticity_enabled and !self.plasticity_enabled)
+            return error.ReservoirPlasticityNeedsPlasticity;
 
         // Phase 8 arithmetic layout. The position-bound symbol assemblies plus
         // answer assemblies are all carved from the low excitatory IDs; require
@@ -526,7 +562,7 @@ pub const Config = struct {
             if (!self.structural_plasticity_enabled)
                 return error.ConsolidationNeedsStructuralPlasticity;
             if (!self.plasticity_enabled) return error.ConsolidationNeedsPlasticity;
-            if (!self.task_enabled and !self.arithmetic_enabled)
+            if (!self.task_enabled and !self.arithmetic_enabled and !self.context_task_enabled)
                 return error.ConsolidationNeedsPlasticTask;
             if (!isNonNegative(self.consolidation_lr)) return error.BadConsolidationLr;
         }
@@ -620,6 +656,9 @@ test "config: invalid numeric and mechanism combinations are rejected" {
         .{ .config = .{ .adaptation_decay = 1.0 }, .expected = error.BadAdaptationParameter },
         .{ .config = .{ .structural_plasticity_enabled = true, .weight_permanence_decay = 1.1 }, .expected = error.BadStructuralCoefficient },
         .{ .config = .{ .task_enabled = true, .arithmetic_enabled = true }, .expected = error.OverlappingTaskLayouts },
+        .{ .config = .{ .task_enabled = true, .context_task_enabled = true }, .expected = error.OverlappingTaskLayouts },
+        .{ .config = .{ .context_task_enabled = true, .context_task_group_size = 20 }, .expected = error.ContextTaskGroupsExceedExcitatory },
+        .{ .config = .{ .reservoir_plasticity_enabled = true }, .expected = error.ReservoirPlasticityNeedsPlasticity },
         .{ .config = .{ .structural_plasticity_enabled = true, .consolidation_enabled = true, .task_enabled = true }, .expected = error.ConsolidationNeedsPlasticity },
         .{ .config = .{ .structural_plasticity_enabled = true, .consolidation_enabled = true, .plasticity_enabled = true }, .expected = error.ConsolidationNeedsPlasticTask },
         .{ .config = .{ .steps = 0 }, .expected = error.ZeroRunLength },
